@@ -49,15 +49,12 @@ library
 
   build-depends:
       base
-    , ieee754
+    , bytestring
     , lens
-    , MonadRandom
     , mtl
-    , primitive
-    , random
     , semigroups
     , text
-    , tf-random
     , transformers
+    , utf8-string
     , vector
     , VecEdit
