@@ -9,9 +9,10 @@ module VecEdit.Text.Editor
     newEditTextState, runEditText, evalEditText,
     popLine, pushLine, cursorToEnd, getLineIndex, putLineIndex,
     flushLine, newline, insertChar, insertString,
-    foldLinesInRange, foldLinesFromCursor, editTextLiftGapBuffer,
+    mapRangeFreeze, foldLinesInRange, foldLinesFromCursor, editTextLiftGapBuffer,
     lineNumber, columnNumber, textPoint,
-    TextBoundsLimited(..), validateTextPoint,
+    TextBoundsLimited(..), validateBounds, validateTextPoint,
+    maxLineIndex, minLineIndex, maxCharIndex, minCharIndex,
     EditLine(..), newEditLineState, runEditLine, editLineLiftGB, runEditLineIO,
     EditLineState(..), editLineGapBuffer, editLineTextData,
     loadHandleEditText, editLineFlush,
@@ -65,9 +66,9 @@ import VecEdit.Vector.Editor.GapBuffer
   )
 
 import Control.Applicative (Alternative(..))
-import Control.Arrow (left)
+import Control.Arrow (left, (&&&), (|||))
 import Control.Lens (Lens', lens, use, (&), (^.), (.~), (%~), (.=))
-import Control.Monad (MonadPlus(..), forM_)
+import Control.Monad (MonadPlus(..), forM_, (>=>))
 import Control.Monad.Cont (MonadCont(callCC), ContT, runContT)
 import Control.Monad.Except (MonadError(..), ExceptT(..), runExceptT)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -75,6 +76,7 @@ import Control.Monad.State (StateT(..), MonadState(..), runStateT, evalStateT)
 
 import qualified Data.Text as Strict
 import qualified Data.Text.IO as Strict
+import Data.Vector (Vector, freeze)
 import qualified Data.Vector.Mutable as MVec
 import Data.Vector.Mutable (IOVector)
 import qualified Data.Vector.Unboxed.Mutable as UMVec
@@ -389,6 +391,9 @@ instance TextBoundsLimited TextPoint where
       )
     )
     (pure . Left)
+
+validateBounds :: TextBoundsLimited i => i -> EditText tags i
+validateBounds = inBounds >=> (throwError ||| pure)
 
 -- | Get the current 'LineIndex' for the cursor in an 'EditText' function editing a text buffer.
 lineNumber :: EditText tags LineIndex
@@ -711,6 +716,47 @@ foldLinesInRange range f fold = do
     callCC $ \ halt ->
     (if forward then lo halt >> hi halt else hi halt >> lo halt) >>
     get
+
+-- | Perform a map over the lines in a 'TextRange' and freeze the results in an immutable
+-- buffer. The mapping function provided can simply be @('const' 'pure')@ to copy each line without
+-- modification.
+mapRangeFreeze
+  :: TextRange LineIndex
+  -> (LineIndex -> TextLine tags -> IO a)
+  -> EditText tags (Vector a)
+mapRangeFreeze range f = do
+  let forward = textRangeIsForward range
+  editTextLiftGapBuffer $ do
+    let start = fromIndex (range ^. textRangeStart)
+    let end   = fromIndex (range ^. textRangeEnd)
+    loIndex <- fromGaplessIndex $ min start end
+    hiIndex <- fromGaplessIndex $ max start end
+    (loSlice, _, hiSlice) <- gapBuffer3SliceInRange $
+      Range
+      { theRangeStart = loIndex
+      , theRangeLength = hiIndex - loIndex + 1
+      }
+    let mkIndex offset = toIndex . GaplessIndex . (+ offset)
+    let hiOffset = loIndex + MVec.length loSlice
+    let totalLength = MVec.length loSlice + MVec.length hiSlice
+    newVec <- liftIO $ MVec.new totalLength
+    let mapping globalOffset localOffset slice =
+          let top = MVec.length slice - 1 in
+          let indicies = (if forward then id else (top -)) <$> [0 .. top] in
+          flip evalStateT localOffset $
+          forM_ indicies $ \ sourceIndex ->
+          state (id &&& (+ 1)) >>= \ targetIndex ->
+          liftIO $
+          MVec.read slice sourceIndex >>=
+          f (mkIndex globalOffset sourceIndex) >>=
+          MVec.write newVec targetIndex
+    if forward then
+      mapping loIndex 0 loSlice >>
+      mapping hiOffset (MVec.length loSlice) hiSlice
+     else
+      mapping hiOffset 0 hiSlice >>
+      mapping loIndex (MVec.length hiSlice) loSlice
+    liftIO $ freeze newVec
 
 ------------------------------------------------------------------------------------------------------
 
