@@ -7,8 +7,8 @@ module VecEdit.Text.String
     byteStreamToLines, stringFillCharBuffer,
     hReadLineBufferSize,
     FoldableString(..), StringLength(..),
-    FromStringData(..), ToStringData(..), convertString,
-    textFromString, bytesFromString, byteVecFromString, uvecFromString,
+    FromStringData(..), ToStringData(..), tryConvertString, convertString,
+    textFromString, bytesFromString, lazyBytesFromString, byteVecFromString, uvecFromString,
     TextLine, theTextLineBreak, theTextLineData, theTextLineTags,
     textLineTags, textLineBreakSymbol, textLineIsUndefined, undefinedTextLine,
     emptyTextLine, fuseIntoTextLine,
@@ -130,12 +130,15 @@ class ToStringData   t where { toStringData   :: Maybe t -> StringData; }
 -- the usual 'String' data type, as all 'String' values are first converted to a @('UVec.Vector'
 -- 'Char')@ type first, which consumes the entire 'String' and store it in memory, before
 -- re-encoding it as some other string type.
+tryConvertString :: (ToStringData a, FromStringData b) => a -> Maybe b
+tryConvertString = fromStringData . toStringData . Just
+
+-- | An non-total version of 'tryConvertString', i.e. it evaluates to
+-- an 'error' if 'tryConvertString' evaluates to 'Nothing'.
 convertString :: (ToStringData a, FromStringData b) => a -> b
 convertString =
   maybe (error "convertString: fromStringData evaluates to undefined") id .
-  fromStringData .
-  toStringData .
-  Just
+  tryConvertString
 
 instance StringLength String    where { stringLength = length; }
 instance StringLength ByteVector  where { stringLength = UTF8.length; }
@@ -241,12 +244,17 @@ textFromString =
   BuildText.toLazyText .
   foldString (\ str -> (str <>) . BuildText.singleton) mempty
 
--- | Use 'FoldableString' to construct a UTF8-encoded 'ByteString' value.
+-- | Use 'FoldableString' to construct a __lazy__ UTF8-encoded 'LazyBytes.ByteString' value.
+lazyBytesFromString :: FoldableString str => str -> LazyBytes.ByteString
+lazyBytesFromString = 
+  BuildBytes.toLazyByteString .
+  foldString (\ str -> (str <>) . BuildBytes.charUtf8) mempty
+
+-- | Use 'FoldableString' to construct a __strict__ UTF8-encoded 'ByteString' value.
 bytesFromString :: FoldableString str => str -> ByteString
 bytesFromString =
   LazyBytes.toStrict .
-  BuildBytes.toLazyByteString .
-  foldString (\ str -> (str <>) . BuildBytes.charUtf8) mempty
+  lazyBytesFromString
 
 -- | Use 'FoldableString' to construct a UTF8-encoded 'ByteString' value.
 byteVecFromString :: FoldableString str => str -> ByteVector
