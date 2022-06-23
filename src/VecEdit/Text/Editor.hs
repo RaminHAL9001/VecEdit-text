@@ -21,7 +21,7 @@ module VecEdit.Text.Editor
     ----
     ---- To perform parsing of text, use the "Hakshell.TextEditor.Parser" module. The 'StreamCursor'
     ---- provided here provides stateful information necessary to efficiently deliver a stream of
-    ---- characters from a 'TextBuffer' to a 'Hakshell.TextEditor.Parser.Parser'.
+    ---- characters from a 'EditTextState' to a 'Hakshell.TextEditor.Parser.Parser'.
     --
     StreamCursor, newStreamCursorRange, newStreamCursor,
     streamIsEOF, streamIsEOL,
@@ -336,14 +336,18 @@ class TextBoundsLimited index where
 minLineIndex :: EditText tags LineIndex
 minLineIndex = pure 1
 
+-- | Return the maximum 'LineIndex' value for the current 'EditTextState' of the 'EditText' function
+-- context. An empty 'EditTextState' will return a value of 0.
 maxLineIndex :: EditText tags LineIndex
-maxLineIndex = toIndex . GaplessIndex <$> editTextLiftGapBuffer cursorElemCount
+maxLineIndex = toIndex . GaplessIndex . subtract 1 <$> editTextLiftGapBuffer cursorElemCount
 
 minCharIndex :: EditLine tags CharIndex
 minCharIndex = pure 1
 
+-- | Return the maximum 'CharIndex' value for the current 'EditLineState' of the 'EditLine' function
+-- context. An empty 'EditLineState' will return a value of 0.
 maxCharIndex :: EditLine tags CharIndex
-maxCharIndex = toIndex . GaplessIndex <$> editLineLiftGB cursorElemCount
+maxCharIndex = toIndex . GaplessIndex . subtract 1 <$> editLineLiftGB cursorElemCount
 
 genericInBounds
   :: (Monad m, Eq i, Ord i, Bounded i)
@@ -356,7 +360,7 @@ genericInBounds getmin getmax mkerr i =
   getmax >>= \ hi ->
   if i == minBound then pure (Right lo)
   else if i == maxBound then pure (Right hi)
-  else if lo <= i && i < hi then pure (Right i)
+  else if lo <= i && i <= hi then pure (Right i)
   else pure $ Left $ mkerr lo hi i
 
 instance TextBoundsLimited LineIndex where
@@ -590,8 +594,7 @@ cursorToEnd dir =
     After  -> count
 
 -- | Overwrite the current line in the 'TextEditState' with the content of the current
--- 'LineEditState', do not move the cursor. This action is idempotent as long as no updates are made
--- to the 'LineEditState' and as long as the cursor does not move.
+-- 'LineEditState', do not move the cursor.
 flushLine :: Eq (TextLine tags) => EditText tags (TextLine tags)
 flushLine = do
   line <- runEditLine editLineFlush
@@ -721,7 +724,8 @@ foldLinesInRange range f fold = do
 -- buffer. The mapping function provided can simply be @('const' 'pure')@ to copy each line without
 -- modification.
 mapRangeFreeze
-  :: TextRange LineIndex
+  :: Eq tags
+  => TextRange LineIndex
   -> (LineIndex -> TextLine tags -> IO a)
   -> EditText tags (Vector a)
 mapRangeFreeze range f = do
