@@ -5,7 +5,7 @@
 -- batch operations using these APIs will be much slower than using 'GapBuffer' or 'Editor', but
 -- that is OK because these APIs are designed specifically for interactive use by end-users.
 module VecEdit.Text.Editor
-  ( EditText(..), EditTextState(..),
+  ( EditText(..), EditTextState(..), TextBuffer,
     newEditTextState, runEditText, evalEditText,
     popLine, pushLine, cursorToEnd, getLineIndex, putLineIndex,
     flushLine, newline, insertChar, insertString,
@@ -16,18 +16,7 @@ module VecEdit.Text.Editor
     EditLine(..), newEditLineState, runEditLine, editLineLiftGB, runEditLineIO,
     EditLineState(..), editLineGapBuffer, editLineTextData,
     loadHandleEditText, editLineFlush,
-
-    ---- * Parser Stream
-    ----
-    ---- To perform parsing of text, use the "Hakshell.TextEditor.Parser" module. The 'StreamCursor'
-    ---- provided here provides stateful information necessary to efficiently deliver a stream of
-    ---- characters from a 'EditTextState' to a 'Hakshell.TextEditor.Parser.Parser'.
-    --
-    StreamCursor, newStreamCursorRange, newStreamCursor,
-    streamIsEOF, streamIsEOL,
-    --streamGoto, streamLook, streamStep,
-    streamTags, streamCommitTags, streamResetCache, streamResetEndpoint,
-    theStreamCache, theStreamLocation, theStreamEndpoint,
+    VecEdit.Vector.Editor.currentBuffer,
 
     -- ** Debugging
     debugViewTextEditor,
@@ -35,7 +24,7 @@ module VecEdit.Text.Editor
 
 import VecEdit.Types
   ( CharBufferSize, LineIndex, CharIndex, toIndex, fromIndex,
-    TextPoint(..), textPointRow, textPointColumn,
+    TextPoint(..),
     TextRange, textRangeIsForward,
     VectorIndex, VectorSize, Range(..), textRangeStart, textRangeEnd,
     RelativeDirection(..), RelativeIndex, GaplessIndex(..),
@@ -50,8 +39,8 @@ import VecEdit.Text.String
   ( TextLine, stringLength, textLineBreakSymbol, textLineTags,
     undefinedTextLine, textLineIsUndefined, fuseIntoTextLine,
     stringFillCharBuffer, streamReadLines, undefinedTextLine,
-    IOByteStream(..), hSetByteStreamMode,
-    --StringData(..), StringLength(..), FromStringData(..),
+    IOByteStream(..), hSetByteStreamMode, undefinedTextLine,
+    StringLength(..),
   )
 import VecEdit.Text.TokenizerTable (TokenizerTable)
 import VecEdit.Vector.Editor
@@ -202,6 +191,9 @@ editLineFlush =
 -- editor, which you can use to construct lines of text to fill into the 'EditTextState'.
 newtype EditText tags a = EditText (ExceptT EditTextError (StateT (EditTextState tags) IO) a)
   deriving (Functor, Applicative, Monad, MonadIO, MonadState (EditTextState tags))
+
+-- | A 'TextBuffer' is really just the state data used by the 'EditText' monad.
+type TextBuffer tags = EditTextState tags
 
 -- | The mutable state of the 'EditText' function type.
 data EditTextState tags
@@ -761,182 +753,6 @@ mapRangeFreeze range f = do
       mapping hiOffset 0 hiSlice >>
       mapping loIndex (MVec.length hiSlice) loSlice
     liftIO $ freeze newVec
-
-------------------------------------------------------------------------------------------------------
-
--- | This data type will ordinarily not be useful on it's own, it should be used by way of the
--- "VecEdit.Text.Parser" module, although if you need to perform special parsing operations,
--- such as running a single parser over multiple buffers, you may need to use some of the APIs here.
---
--- This data type can be thought of as a sort of "cursor" that inspects every character within a
--- 'TextBuffer', and contains the state necessary to perform parsing over a 'TextBuffer'. Streaming
--- characters from a 'TextBuffer' is very efficient, all character retreival operates in O(1) time,
--- and all characters are already in memory so there is no additional cost for look-aheads or
--- backtracking, as the cost has already been paid in advance.
---
--- Thinking of this data structure as a text cursor, the current character under the cursor value is
--- taken with the 'streamLook' function, the cursor is stepped to the next character using
--- 'streamStep', and the cursor can be moved to an arbitrary 'TextLocation' using
--- 'streamGoto'.
---
--- This data type is immutable (pure), so modifications to the state of this object must be stored
--- on the stack, or used as the mutable value of a 'State' monad, or stored in a mutable variable of
--- some form. Although you create a 'StreamCursor' cursor within a 'EditText' function evaluation
--- context, the 'StreamCursor' is not sensitive to which 'TextBuffer' is currently being inspected
--- by the 'EditText' function. This means your 'EditText' function evaluating in 'TextBuffer' @a@
--- can return the 'StreamCursor', and this same parser stream can then be used to call
--- 'streamLook' within an 'EditText' function that is currently evaluating in a different
--- 'TextBuffer' @b@. The 'StreamCursor' itself only contains the current 'TextLocation' and a cached
--- copy of the last line that it had been inspecting. If you are performing low-level programming of
--- parsers using a 'StreamCursor' it is up to you to ensure the 'StreamCursor' evaluates in the
--- expected 'TextBuffer'.
-data StreamCursor tags
-  = StreamCursor
-    { theStreamCache    :: !(TextLine tags)
-      -- ^ Get the 'TextLine' currently being cached by this 'StreamCursor' object. This cached
-      -- 'TextLine' changes every time the 'streamLocation' moves to another line, or when
-      -- 'streamResetCache' is evaluated within an 'EditText' function context.
-    , theStreamLocation :: !TextPoint
-      -- ^ Thinking of a 'StreamCursor' as a cursor pointing to a character within a 'TextBuffer'
-      -- this function returns the 'TextLocation' of the cursor, similar to how 'getLocation'
-      -- returns the location of the text editing cursor.
-    , theStreamEndpoint :: !TextPoint
-      -- ^ This is 'TextLocation' of the final character within the 'TextBuffer' from which this
-      -- 'StreamCursor' is reading. If the 'TextBuffer' is modified during parsing, this value must
-      -- be updated by evaluating 'streamResetEndpoint'.
-    }
-
--- not for export
-streamCache :: Lens' (StreamCursor tags) (TextLine tags)
-streamCache = lens theStreamCache $ \ a b -> a{ theStreamCache = b }
-
--- not for export
-streamLocation :: Lens' (StreamCursor tags) TextPoint
-streamLocation = lens theStreamLocation $ \ a b -> a{ theStreamLocation = b }
-
----- not for export
---streamEndpoint :: Lens' (StreamCursor tags) TextPoint
---streamEndpoint = lens theStreamEndpoint $ \ a b -> a{ theStreamEndpoint = b }
-
--- | This is not a getter but a lens which you can use to update the @tags@ of the current
--- 'StreamCursor'. If you do update the @tags@, you can call 'streamCommitTags' to write these
--- tags back to the 'TextBuffer'. The 'streamCommitTags' function is called automatically by
--- the 'streamStep' function.
-streamTags :: Lens' (StreamCursor tags) (Maybe tags)
-streamTags = streamCache . textLineTags
-
--- | Constructs a new 'StreamCursor' at a given 'TextPoint' within a given 'TextBuffer'. This
--- function must validate the 'TextPoint' using 'testLocation', so the return type is similar in
--- meaning to the return type of 'validateTextPoint', which may throw a soft exception (which can be
--- caught with 'catchError') if the given 'TextPoint' is out of bounds.
-newStreamCursorRange :: Eq tags => TextPoint -> TextPoint -> EditText tags (StreamCursor tags)
-newStreamCursorRange start end = streamResetCache StreamCursor
-  { theStreamCache    = undefinedTextLine
-  , theStreamLocation = min start end
-  , theStreamEndpoint = max start end
-  } >>= streamResetEndpoint (max start end)
-
--- | A convenience function that calls 'newStreamCursorRange' with 'minBound' as the 'TextPoint'.
-newStreamCursor :: Eq tags => EditText tags (StreamCursor tags)
-newStreamCursor = newStreamCursorRange minBound maxBound
-
----- | This in an 'EditText' type of function which moves a given 'StreamCursor' to a different
----- location within the 'TextBuffer' of the current 'EditText' context. This can be used to perform
----- backtracking, or forward-tracking, or any kind of tracking.
-----
----- If the given 'StreamCursor' originated in a different 'TextBuffer' (supposing the 'EditText'
----- function in which 'newStreamCursor' was evaluated returned the 'StreamCursor'), the target
----- 'TextBuffer' for the 'StreamCursor' simply changes over to the new 'TextBuffer' and begins
----- sourcing characters from there. You should probably evaluate 'streamResetCache' 
-----
----- This function must validate the 'TextPoint' using 'validateTextPoint', and so may throw a soft
----- exception (which can be caught with 'catchError') if the given 'TextPoint' is out of bounds.
---streamGoto :: StreamCursor tags -> TextPoint -> EditText tags (StreamCursor tags)
---streamGoto cursor = validateTextPoint >=> \ (loc, txt) ->
---  return cursor{ theStreamCache = txt, theStreamLocation = loc }
---
----- | Thinking of the 'StreamCursor' as a cursor pointing to a character within a 'TextBuffer' this
----- function returns the character currently under the cursor __without advancing the cursor.__ This
----- function throws an @'EndOfLineBuffer' 'After'@ exception if 'streamResetCache' cannot resolve
----- 'theStreamLocation'. This function throws an @'EndOfCharBuffer' 'After'@ exception if cursor has
----- somehow moved beyond 'theStreamCache', which could only happen if the 'streamResetCache' function
----- has not been called after transplanting the 'StreamCursor' to another 'TextBuffer'.
---streamLook :: StreamCursor tags -> EditText tags (Char, StreamCursor tags)
---streamLook s =
---  let line = theStreamCache s in
---  if textLineIsUndefined line then
---    streamResetCache s >>= streamLook
---  else
---    case textLineGetChar line (theStreamLocation s ^. charIndex) of
---      Nothing           -> throwError $ EndOfCharBuffer After
---      Just  c           -> return (c, s)
---{-# INLINE streamLook #-}
---
----- | Thinking of the 'StreamCursor' as a cursor pointing to a character within a 'TextBuffer' this
----- function advances the cursor without reading any characters.
---streamStep :: StreamCursor tags -> EditText tags (StreamCursor tags)
---streamStep s = do
---  let i   = fromIndex $ s ^. streamLocation . charIndex
---  let top = intSize   $ s ^. streamCache
---  when (i >= top) $ streamCommitTags s
---  return $ 
---    ( if i < top then streamLocation . charIndex +~ 1 else
---        (streamLocation %~ (lineIndex +~ 1) . (charIndex .~ 1)) .
---        (streamCache .~ TextLineUndefined)
---    ) s
---{-# INLINE streamStep #-}
-
--- | The 'streamStep' function may have placed this stream into a state indicating that the cursor
--- has stepped beyond the end of the current 'TextLine'. This function returns whether or not this
--- is the case.
-streamIsEOL :: StreamCursor tags -> Bool
-streamIsEOL s =
-  let line =  (s ^. streamCache) in
-  if textLineIsUndefined line then True else
-  unwrapGaplessIndex (fromIndex (s ^. streamLocation . textPointColumn)) >= stringLength line
-{-# INLINE streamIsEOL #-}
-
--- | Tests whether 'theStreamLocation' is greater-than or equal-to 'theStreamEndpoint'.
-streamIsEOF :: StreamCursor tags -> Bool
-streamIsEOF s = theStreamLocation s >= theStreamEndpoint s
-{-# INLINE streamIsEOF #-}
-
--- | There are times when the 'StreamCursor' contains a cached 'TextLine' (given by the
--- 'streamCache' value) that is different from the actual 'TextLine' unders the cursor
--- location of the 'TextPoint' given by 'streamLocation'. This can happen when you evaluate
--- a 'StreamCursor' in a new 'EditText' context for a different 'TextBuffer', or if
--- 'flushLineEditor' has been evaluated and modified the line currently being inspected by the
--- 'StreamCursor'.
---
--- If you happen to know that the 'TextLine' given by 'streamCache' is different from what it
--- should be, you should evaluate this function to reset the cached 'TextLine' to the correct
--- value. This function must also check that the 'streamLocation' is still valid, so it may
--- evaluate to a @('Left' 'After')@ or @('Left' 'Before')@ value as with the 'streamGoto'
--- function.
-streamResetCache :: Eq tags => StreamCursor tags -> EditText tags (StreamCursor tags)
-streamResetCache s = do
-  (loc, txt) <- validateTextPoint (theStreamLocation s)
-  return (s & streamLocation .~ loc & streamCache .~ txt)
-
--- | This function should only need to be evaluated once as long as the 'TextBuffer' never changes
--- during the parsing process. If the 'TextBuffer' does change while the parsing has been paused,
--- this function must be evaluated to ensure the 'StreamCursor' is aware of the endpoint.
-streamResetEndpoint
-  :: Eq tags
-  => TextPoint
-  -> StreamCursor tags
-  -> EditText tags (StreamCursor tags)
-streamResetEndpoint loc s = do
-  (loc, _txt) <- validateTextPoint loc
-  return (s & streamLocation .~ loc)
-
--- | You can use the 'streamTags' lens to alter the @tags@ value of the line cached (the line
--- returned by 'streamCache'd function), but to actually store these changes back to the
--- 'TextBuffer', this function must be called. This function is called automatically by the
--- 'streamStep' function when the cursor steps past the end of the current line and to the
--- next line.
-streamCommitTags :: StreamCursor tags -> EditText tags ()
-streamCommitTags s = putLineIndex (s ^. streamLocation . textPointRow) (s ^. streamCache)
 
 ----------------------------------------------------------------------------------------------------
 

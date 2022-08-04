@@ -1,5 +1,5 @@
 module VecEdit.Text.String
-  ( StringData(..), ByteVector(..), byteVectorSize,
+  ( StringData(..), ByteVector(..), CharVector, byteVectorSize,
     ReadLines(..), HaltReadLines, Word8GapBuffer, Word8GapBufferState,
     runReadLines, readLinesLiftGapBuffer, isAsciiOnly,
     hReadLines, streamReadLines, hSetByteStreamMode,
@@ -7,11 +7,12 @@ module VecEdit.Text.String
     byteStreamToLines, stringFillCharBuffer,
     hReadLineBufferSize,
     FoldableString(..), StringLength(..),
+    IndexableString(..), IOIndexableString(..), CuttableString(..),
     FromStringData(..), ToStringData(..), tryConvertString, convertString,
     textFromString, bytesFromString, lazyBytesFromString, byteVecFromString, uvecFromString,
     TextLine, theTextLineBreak, theTextLineData, theTextLineTags,
     textLineTags, textLineBreakSymbol, textLineIsUndefined, undefinedTextLine,
-    emptyTextLine, fuseIntoTextLine,
+    emptyTextLine, textLineGetChar, fuseIntoTextLine,
     IOByteStream(..), EditorStream,
     newEditorStream, streamByteString, streamLazyByteString,
     module Data.String
@@ -50,6 +51,7 @@ import Codec.Binary.UTF8.String (encodeChar)
 import Data.Bits ((.&.))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import qualified Data.ByteString as Bytes
+import qualified Data.ByteString.Char8 as CBytes
 import qualified Data.ByteString.Lazy as LazyBytes
 import qualified Data.ByteString.Builder as BuildBytes
 import Data.ByteString.Char8 (ByteString)
@@ -72,6 +74,7 @@ import System.IO
 ----------------------------------------------------------------------------------------------------
 
 type UVector = UVec.Vector
+type CharVector = UVector Char
 
 newtype ByteVector = ByteVector { unwrapByteVector :: UVector Word8 }
   deriving (Eq, Ord, Semigroup, Monoid)
@@ -292,6 +295,53 @@ stringFillCharBuffer mvec from str =
 
 ----------------------------------------------------------------------------------------------------
 
+-- | A class of string data types that can be indexed, retriving a 'Char' at some 'Int' position
+-- from the start of the @str@ string. As a law, instances of this type class must be able to index
+-- a @str@ data type in O(1) time.
+class IndexableString str where
+  charAtIndex :: str -> Int -> Char
+
+instance IndexableString (UVector Char) where
+  charAtIndex = (UVec.!)
+
+instance IndexableString ByteString where
+  charAtIndex str = CBytes.index str
+
+instance IndexableString ByteVector where
+  charAtIndex (ByteVector str) = chr . fromIntegral . (str UVec.!)
+
+instance IndexableString StringData where
+  charAtIndex str i = case stringDataGetChar str i of
+    Left err -> error $ Strict.unpack err
+    Right  c -> c
+
+instance IndexableString (TextLine tags) where
+  charAtIndex (TextLine{theTextLineData=str}) = charAtIndex str
+
+-- | Like 'IndexableString' but must be indexed in the IO monad
+class IOIndexableString str where
+  charAtIndexIO :: str -> Int -> IO Char
+
+instance IOIndexableString (UMVec.IOVector Char) where
+  charAtIndexIO = UMVec.read
+
+instance IOIndexableString (UMVec.IOVector Word8) where
+  charAtIndexIO str = fmap (chr . fromIntegral) . UMVec.read str
+
+instance IOIndexableString (UVector Char) where
+  charAtIndexIO str = pure . charAtIndex str
+
+instance IOIndexableString ByteVector where
+  charAtIndexIO str = pure . charAtIndex str
+
+instance IOIndexableString StringData where
+  charAtIndexIO str = pure . charAtIndex str
+
+instance IOIndexableString (TextLine tags) where
+  charAtIndexIO str = pure . charAtIndex str
+
+----------------------------------------------------------------------------------------------------
+
 -- | This data type contains a string read from a character string and possibly terminated by a line
 -- breaking character. If there is a line breraking character, it is converted to '\n' and the
 -- actual 'LineBreakSymbol' is associated with it.
@@ -299,8 +349,6 @@ stringFillCharBuffer mvec from str =
 -- A 'TextLine' by default will encode strings as 'ByteVector's, but will automatically detect UTF8
 -- encoded text, and if any character @c@ such that @ord c > 127@ exist in the stream, the internal
 -- buffer is converted from 'ByteVector' to @('UVector' 'Char')@.
---
--- Getting the length of a 'TextLine' value is guaranteed to be an @O(1)@ operation.
 --
 -- The @tags@ type variable allows you to store annotation data along with this string, which is a
 -- feature used more by the "VecEdit.Text.Editor" module for storing intermediate parser states
@@ -367,6 +415,74 @@ fuseIntoTextLine lbrk tags =
   , theTextLineData = StringVector str
   , theTextLineTags = tags
   }
+
+-- | Similar to 'charAtIndex', but may fail (return Nothing) if indecing an 'undefinedTextLine'.
+stringDataGetChar :: StringData -> VectorIndex -> Either Strict.Text Char
+stringDataGetChar str i = case str of
+  StringText    str -> Right $ Strict.index str i
+  StringBytes   str -> Right $ charAtIndex str i
+  StringByteVec str -> Right $ charAtIndex str i
+  StringVector  str -> Right $ charAtIndex str i
+  StringUndefined   ->
+    Left $ Strict.pack $
+    "evaluated (charAtIndex " <> show i <> ") on undefined string"
+
+-- | Similar to 'charAtIndex', but may fail (return Nothing) if indecing an 'undefinedTextLine'.
+textLineGetChar :: TextLine tags -> VectorIndex -> Either Strict.Text Char
+textLineGetChar = stringDataGetChar . theTextLineData
+
+----------------------------------------------------------------------------------------------------
+
+-- | This class defines functions for taking a part of a string from a given 'VectorIndex', toward
+-- the start or end of a string. If the given 'VectorIndex' is too big, an empty string is
+-- returned. If the given 'VectorIndex' is too small, the string is returned unmodified.
+class CuttableString str where
+  -- | Remove characters from the start of the string up to the given 'VectorIndex'.
+  cutFromStart :: VectorIndex -> str -> str
+  -- | Remove characters from the end of the string back to the given 'VectorIndex'.
+  cutFromEnd :: VectorIndex -> str -> str
+
+instance CuttableString ByteString where
+  cutFromStart i = fst . CBytes.splitAt i
+  cutFromEnd   i = snd . CBytes.splitAt i
+
+instance CuttableString ByteVector where
+  cutFromStart i (ByteVector str) = ByteVector $ uvecCutFromStart i str
+  cutFromEnd   i (ByteVector str) = ByteVector $ uvecCutFromEnd   i str
+
+instance CuttableString (UVector Char) where
+  cutFromStart = uvecCutFromStart
+  cutFromEnd   = uvecCutFromEnd
+
+instance CuttableString Strict.Text where
+  cutFromStart = Strict.drop
+  cutFromEnd = Strict.dropEnd
+
+instance CuttableString StringData where
+  cutFromStart i = \ case
+    StringUndefined   -> StringUndefined
+    StringText    str -> StringText    $ cutFromStart i str
+    StringBytes   str -> StringBytes   $ cutFromStart i str
+    StringByteVec str -> StringByteVec $ cutFromStart i str
+    StringVector  str -> StringVector  $ cutFromStart i str
+  cutFromEnd i = \ case
+    StringUndefined   -> StringUndefined
+    StringText    str -> StringText    $ cutFromEnd i str
+    StringBytes   str -> StringBytes   $ cutFromEnd i str
+    StringByteVec str -> StringByteVec $ cutFromEnd i str
+    StringVector  str -> StringVector  $ cutFromEnd i str
+
+instance CuttableString (TextLine tags) where
+  cutFromStart i line = line{ theTextLineData = cutFromStart i $ theTextLineData line }
+  cutFromEnd   i line = line{ theTextLineData = cutFromEnd   i $ theTextLineData line }
+
+uvecCutFromStart :: UVec.Unbox c => VectorIndex -> UVector c -> UVector c
+uvecCutFromStart = UVec.drop
+
+uvecCutFromEnd :: UVec.Unbox c => VectorIndex -> UVector c -> UVector c
+uvecCutFromEnd i vec = UVec.take (UVec.length vec - i) vec
+
+----------------------------------------------------------------------------------------------------
 
 -- | Default buffer size for the 'hReadLines' function.
 hReadLineBufferSize :: Int
