@@ -2,10 +2,11 @@
 module VecEdit.Text.Parser
   ( -- * String Parser
     StringParser(..), StringParserResult(..), currentTextPoint,
-    runStringParser, resumeStringParser, parserResultWaiting,
+    runStringParser, feedStringParser, parserResultWaiting,
     StringParserState(..), stringParserState,
-    parserString, parserIndex, parserCharCount, parserLineIndex,
-    parserLabel, parserStartPoint, parserIsEOF, parserTextPoint,
+    parserIndex, parserStream, parserIsEOF,
+    parserCursor, parserRow, parserColumn,
+    parserStartPoint, parserLabel,
 
     -- * Text Buffer Parser
     Parser(..), modifyTags, liftStringParser,
@@ -21,24 +22,26 @@ module VecEdit.Text.Parser
   ) where
 
 import VecEdit.Types
-       ( TextPoint(..), TextRange(..), VectorIndex, VectorSize,
-         ToIndex(..), FromIndex(..), IndexValue(..), GaplessIndex(..),
-         LineIndex(..), CharIndex
+       ( TextPoint(..), TextRange(..), ToIndex(..), FromIndex(..), IndexValue(..),
+         LineIndex(..), CharIndex, textPointRow, textPointColumn,
        )
-import VecEdit.Print.DisplayInfo (DisplayInfo(..), displayInfoShow)
+import VecEdit.Print.DisplayInfo (DisplayInfo(displayInfo), displayInfoShow)
 import VecEdit.Text.String
-       ( TextLine, StringLength(..), IOIndexableString(..), CuttableString(..), textLineTags)
+       ( TextLine, textLineTags,
+         StringLength(stringLength), CharStreamable(toCharStream),
+         CharStream, getCharStream, getCharStreamCount, stepCharStream, charStreamAppend,
+       )
 import VecEdit.Text.Editor
        ( EditText, TextBuffer, getLineIndex, maxLineIndex,
        )
 
 import Control.Applicative (Alternative(empty, (<|>)))
-import Control.Lens ((.=), (+=), (%=), Lens', lens, use, assign)
-import Control.Monad (MonadPlus(mplus, mzero), guard, ap)
+import Control.Lens ((.=), (+=), (%=), (^.), (%~), (.~), (+~), Lens', lens, use, assign)
+import Control.Monad (MonadPlus(mplus, mzero), ap)
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Error.Class (MonadError(throwError, catchError))
 import Control.Monad.Reader (MonadReader, ReaderT(..))
-import Control.Monad.State.Lazy (StateT(..), State, runState)
+import Control.Monad.State.Lazy (StateT(..))
 import Control.Monad.State.Class (MonadState(state, get, put))
 import Control.Monad.Trans.Class (MonadTrans(lift))
 
@@ -51,16 +54,16 @@ import Text.Parser.Token (TokenParsing())
 
 ----------------------------------------------------------------------------------------------------
 
--- | An 'StringParser' is a kind of string parser that operates on 'IndexableString's. The
+-- | An 'StringParser' is a kind of string parser that operates on 'CharStreamable' stringss. The
 -- 'StringParserState' has an index value of type 'Int' that points to a position in the string
 -- @str@. When the end of a string is reached the parsers enters into it's 'ParserWait' state. You
 -- can insert another @str@ of input, increment 'theParserLineIndex', and resume parsing.
 --
 -- The 'StringParser' instantiates the 'CharParsing' type class of the "parsers" package.
-newtype StringParser str m a
+newtype StringParser m a
   = StringParser
     { stringParserStateT ::
-        StateT (StringParserState str) m (StringParserResult str m a)
+        StateT StringParserState m (StringParserResult m a)
     }
   deriving Functor
 
@@ -68,103 +71,112 @@ newtype StringParser str m a
 -- current string that the parser is inspecting. There is also a counter keeping track of the total
 -- number of characters inspected, and a counter keeping track of the total number of lines being
 -- inspected.
-data StringParserState str
+--
+-- Initialize a new 'StringParserState' with 'stringParserState', and then evaluate
+-- 'feedStringParser' on the state value for every line of input you receive. Lines needs not be
+-- broken on line breaking characters, but 'parserIsEOF' should be set to 'True' on the final line
+-- of input that is to be parsed.
+data StringParserState
   = StringParserState
-    { theParserString :: !str
+    { theParserStream :: !CharStream
       -- ^ Keeps track of the current string being parsed.
-    , theParserIndex :: !VectorIndex
-      -- ^ Keeps track of the current index in the current 'parserString'.
-    , theParserCharCount :: !VectorSize
+    , theParserIsEOF :: !Bool
+      -- ^ Indicates whether this parser is at the end of it's input. If this is set to 'True' and
+      -- 'getCharStream' is returning 'Nothing' on 'theParserStream', then this parser is at the end
+      -- of the file.
+    , theParserCursor :: !TextPoint
       -- ^ Keeps track of the total number of characters that have been parsed across all lines.
-    , theParserLineIndex :: !LineIndex
-      -- ^ Keeps track of the total number of lines that have been parsed.
-    , theParserLabel :: !Strict.Text
-      -- ^ Keeps track of the name of the parser for a time, used in error reporting.
     , theParserStartPoint :: !TextPoint
       -- ^ Keeps track of 'theParserIndex' and 'theParserLineIndex' of where the current label
       -- ('theParserLabel') was set so that the range of characters for that label can be reported
       -- if an parse error should occur.
-    , theParserIsEOF :: !Bool
-      -- ^ The parser can be set into it's end-of-file state when there is no more input, and if
-      -- 'theParserIndex' has gone past the end of the current @str@ and this flag is set to 'True',
-      -- then the 'eof' parser will return 'True'.
+    , theParserLabel :: !Strict.Text
+      -- ^ Keeps track of the name of the parser for a time, used in error reporting.
     }
 
--- | Construct a new 'StringParserState' from a @str@ value.
-stringParserState :: str -> StringParserState str
-stringParserState str =
+-- | Construct a new 'StringParserState' from a @str@ value. This starts 'parserStartPoint' on line
+-- 0 so that you can initializae a fresh copy of this state value with 'feedStringParser' on the
+-- first line of the input that you need to parse. The 'feedStringParser' function increments the
+-- line number, so running 'feedStringParser' on a fresh 'stringParserState' increments the line
+-- number frome line 0 to line 1.
+stringParserState :: StringParserState
+stringParserState =
   StringParserState
-  { theParserString = str
-  , theParserIndex = 0
-  , theParserCharCount = 0
-  , theParserLineIndex = LineIndex 1
-  , theParserLabel = ""
-  , theParserStartPoint = TextPoint 1 1
+  { theParserStream = mempty
   , theParserIsEOF = False
+  , theParserCursor = line0
+  , theParserStartPoint = line0
+  , theParserLabel = ""
   }
+  where
+  line0 =
+    TextPoint
+    { theTextPointRow = 0
+    , theTextPointColumn = 0
+    }
+
+-- | Keeps track of the current index in the current 'parserStream'.
+parserIndex :: StringParserState -> Int
+parserIndex = getCharStreamCount . theParserStream
 
 -- | Not for export
-getParserState :: Monad m => StringParser str m (StringParserState str)
+getParserState :: Monad m => StringParser m StringParserState
 getParserState = StringParser $ ParseOK <$> get
 
 -- | Not for export
-putParserState :: Monad m => StringParserState str -> StringParser str m ()
+putParserState :: Monad m => StringParserState -> StringParser m ()
 putParserState = StringParser . fmap ParseOK . put
 
--- | Not for export
-onStringParserState :: Monad m => State (StringParserState str) a -> StringParser str m a
-onStringParserState = StringParser . fmap ParseOK . state . runState
-
 -- | Keeps track of the current string being parsed.
-parserString :: Lens' (StringParserState str) str
-parserString = lens theParserString $ \ a b -> a{ theParserString = b }
+parserStream :: Lens' StringParserState CharStream
+parserStream = lens theParserStream $ \ a b -> a{ theParserStream = b }
 
--- | Keeps track of the current index in the current 'parserString'.
-parserIndex :: Lens' (StringParserState str) Int
-parserIndex = lens theParserIndex $ \ a b -> a{ theParserIndex = b }
+-- | Keeps track of whether the current line of input is the last line of input. However the
+-- 'ParserState' is not truly at the end-of-file until 'getCharStream' evaluated on
+-- 'theParserStream' is producing 'Nothing'.
+parserIsEOF :: Lens' StringParserState Bool
+parserIsEOF = lens theParserIsEOF $ \ a b -> a{ theParserIsEOF = b }
 
--- | Keeps track of the total number of characters that have been parsed across all lines.
-parserCharCount :: Lens' (StringParserState str) Int
-parserCharCount = lens theParserCharCount $ \ a b -> a{ theParserCharCount = b }
+-- | Keeps track of the 'TextPoint' of the 'StringParser'.
+parserCursor :: Lens' StringParserState TextPoint
+parserCursor = lens theParserCursor $ \ a b -> a{ theParserCursor = b }
 
--- | Keeps track of the line number.
-parserLineIndex :: Lens' (StringParserState str) LineIndex
-parserLineIndex = lens theParserLineIndex $ \ a b -> a{ theParserLineIndex = b }
+-- | A convenient lens into the 'parserCursor' with 'textPointRow'.
+parserRow :: Lens' StringParserState LineIndex
+parserRow = parserCursor . textPointRow
 
--- | Keeps track of the name of the parser for a time, used in error reporting.
-parserLabel :: Lens' (StringParserState str) Strict.Text
-parserLabel = lens theParserLabel $ \ a b -> a{ theParserLabel = b }
+-- | A convenient lens into the 'parserCursor' with 'textPointColumn
+parserColumn :: Lens' StringParserState CharIndex
+parserColumn = parserCursor . textPointColumn
 
 -- | Keeps track of 'theParserIndex' and 'theParserLineIndex' of where the current label
 -- ('theParserLabel') was set so that the range of characters for that label can be reported if an
 -- parse error should occur. Using the '<?>' combinator sets this value to be equal to the value
 -- returned by 'currentTextPoint'. You can also use 'parserResetStartPoint'.
-parserStartPoint :: Lens' (StringParserState str) TextPoint
+parserStartPoint :: Lens' StringParserState TextPoint
 parserStartPoint = lens theParserStartPoint $ \ a b -> a{ theParserStartPoint = b }
 
--- | The parser can be set into it's end-of-file state when there is no more input, and if
--- 'theParserIndex' has gone past the end of the current @str@ and this flag is set to 'True', then
--- the 'eof' parser will return 'True'.
-parserIsEOF :: Lens' (StringParserState str) Bool
-parserIsEOF = lens theParserIsEOF $ \ a b -> a{ theParserIsEOF = b }
+-- | Keeps track of the name of the parser for a time, used in error reporting.
+parserLabel :: Lens' StringParserState Strict.Text
+parserLabel = lens theParserLabel $ \ a b -> a{ theParserLabel = b }
 
 -- | The 'StringParserResult' is a value that decides how to proceed with the next step of the
 -- parser (i.e. the left hand of the monadic bind operator).
-data StringParserResult str m a
+data StringParserResult m a
   = NoMatch
   | ParseError !Strict.Text
-  | ParseWait (StringParser str m a)
+  | ParseWait (StringParser m a)
   | ParseOK a
   deriving Functor
 
-instance Show a => Show (StringParserResult str m a) where
+instance Show a => Show (StringParserResult m a) where
   show = \ case
     NoMatch        -> "(empty)"
     ParseError err -> "(fail " <> show err <> ")"
     ParseWait{}    -> "(await-input)"
     ParseOK    a   -> "(ok " <> show a <> ")"
 
-instance Monad m => Monad (StringParser str m) where
+instance Monad m => Monad (StringParser m) where
   return = StringParser . return . ParseOK
   (StringParser f) >>= ma = StringParser $ f >>= \ case
     NoMatch         -> pure NoMatch
@@ -172,7 +184,7 @@ instance Monad m => Monad (StringParser str m) where
     ParseError err  -> pure $ ParseError err
     ParseOK    a    -> stringParserStateT $ ma a
 
-instance Monad m => MonadPlus (StringParser str m) where
+instance Monad m => MonadPlus (StringParser m) where
   mzero = StringParser $ pure NoMatch
   mplus (StringParser left) (StringParser right) =
     StringParser $
@@ -181,21 +193,21 @@ instance Monad m => MonadPlus (StringParser str m) where
       ParseWait left -> pure $ ParseWait $ mplus left $ StringParser right
       left           -> pure left
 
-instance Monad m => Applicative (StringParser str m) where
+instance Monad m => Applicative (StringParser m) where
   pure = StringParser . pure . ParseOK
   (<*>) = ap
 
-instance Monad m => Alternative (StringParser str m) where
+instance Monad m => Alternative (StringParser m) where
   empty = mzero
   (<|>) = mplus
 
-instance MonadIO m => MonadIO (StringParser str m) where
+instance MonadIO m => MonadIO (StringParser m) where
   liftIO = StringParser . fmap ParseOK . liftIO
 
-instance MonadTrans (StringParser str) where
+instance MonadTrans (StringParser) where
   lift = StringParser . fmap ParseOK . lift
 
-instance Monad m => MonadError Strict.Text (StringParser str m) where
+instance Monad m => MonadError Strict.Text (StringParser m) where
   throwError err = StringParser $ pure $ ParseError err
   catchError (StringParser f) catch =
     StringParser $
@@ -203,92 +215,74 @@ instance Monad m => MonadError Strict.Text (StringParser str m) where
       ParseError err -> stringParserStateT (catch err)
       a -> pure a
 
-instance Monad m => MonadFail (StringParser str m) where
+instance Monad m => MonadFail (StringParser m) where
   fail = throwError . Strict.pack
 
-instance Show a => DisplayInfo (StringParserResult str m a) where
+instance Show a => DisplayInfo (StringParserResult m a) where
   displayInfo putStr = \ case
     NoMatch        -> putStr "(empty)"
     ParseError err -> putStr "(fail " >> displayInfoShow putStr err >> putStr ")"
     ParseWait{}    -> putStr "(await-input)"
     ParseOK    a   -> putStr "(ok " >> displayInfoShow putStr a >> putStr ")"
 
-instance Show str => Show (StringParserState str) where
+instance Show StringParserState where
   show st =
-    "(parser :index " <> show (theParserIndex st) <>
-    " :line " <> show (theParserLineIndex st) <>
-    " :char-count " <> show (theParserCharCount st) <>
-    " :is-EOF " <> show (theParserIsEOF st) <>
-    " :label " <> show (theParserLabel st) <>
+    "(parser " <> show (theParserStream st) <>
+    " :line " <> show (st ^. parserRow) <>
+    " :column " <> show (st ^. parserColumn) <>
     " :start-point (" <>
     let pt = theParserStartPoint st in
     show (theTextPointRow pt) <> " " <>
     show (theTextPointColumn pt) <>
-    ") :input " <> show (theParserString st) <>
+    ") :label " <> show (theParserLabel st) <>
     ")"
 
-instance Show str => DisplayInfo (StringParserState str) where
+instance DisplayInfo StringParserState where
   displayInfo putStr st = do
-    putStr "(parser\n  :index "
-    displayInfoShow putStr $ theParserIndex st
+    putStr "(parser\n "
+    displayInfoShow putStr $ theParserStream st
     putStr "\n  :line "
-    displayInfoShow putStr $ theParserLineIndex st
-    putStr "\n  :char-count "
-    displayInfoShow putStr $ theParserCharCount st
-    putStr "\n  :is-EOF "
-    displayInfoShow putStr $ theParserIsEOF st
-    putStr "\n  :label "
-    displayInfoShow putStr $ theParserLabel st
+    displayInfoShow putStr (st ^. parserRow)
+    putStr "\n  :column "
+    displayInfoShow putStr (st ^. parserColumn)
     let start = theParserStartPoint st
     putStr "\n  :start-point ("
     displayInfoShow putStr $ theTextPointRow start
     putStr " "
     displayInfoShow putStr $ theTextPointColumn start
-    putStr ")\n  :input\n  "
-    displayInfoShow putStr $ theParserString st
-    putStr ")\n"
+    putStr "\n)\n  :label "
+    displayInfoShow putStr $ theParserLabel st
+    putStr ")"
 
 -- | Run an 'StringParser' function in the monad @m@ on the given 'ParserState'.
 runStringParser
   :: Monad m
-  => StringParser str m a
-  -> StringParserState str
-  -> m (StringParserResult str m a, StringParserState str)
+  => StringParser m a
+  -> StringParserState
+  -> m (StringParserResult m a, StringParserState)
 runStringParser (StringParser f) = runStateT f
 
--- | Run a 'StringParser' function contained within a 'StringParserResult' value.  If the
--- 'StringParserResult' is not 'ParseWait', this function does nothing and returns both arguments
--- unchanged as a pair (2-tuple). The 'uncurry'-ied form of this function can evaluate on the result
--- of the 'runStringParser' function.
-resumeStringParser
-  :: Monad m
-  => StringParserResult str m a
-  -> StringParserState str
-  -> m (StringParserResult str m a, StringParserState str)
-resumeStringParser = \ case
-  NoMatch        -> pure . (,) NoMatch
-  ParseWait  p   -> runStringParser p
-  ParseError err -> pure . (,) (ParseError err)
-  ParseOK    a   -> pure . (,) (ParseOK a)
+-- | Update a 'StringParserState' with a new line of text, and a 'Bool' indicating whether this is
+-- the last line of text. It is assumed the previous line ended at a line break, though this is not
+-- checked.
+feedStringParser :: CharStreamable str => StringParserState -> Bool -> str -> StringParserState
+feedStringParser st eof string =
+  (parserRow +~ 1) .
+  (parserColumn .~ 1) .
+  (parserIsEOF .~ eof) .
+  (parserStream %~ flip charStreamAppend string) $
+  st
 
 -- | Evaluates to 'True' if the given 'StringParserResult' is waiting for more input. When
 -- recursively calling on 'resumeStringParser', use this function to end the recursion.
-parserResultWaiting :: StringParserResult str m a -> Bool
+parserResultWaiting :: StringParserResult m a -> Bool
 parserResultWaiting = \ case
   ParseWait{} -> True
   _ -> False
 
--- | Extract the 'TextPoint' value from the given 'StringParserState'.
-parserTextPoint :: StringParserState str -> TextPoint
-parserTextPoint st =
-  TextPoint
-  { theTextPointRow = theParserLineIndex st
-  , theTextPointColumn = toIndex $ GaplessIndex $ theParserIndex st
-  }
-
 -- | Get the current 'TextPoint'.
-currentTextPoint :: Monad m => StringParser str m TextPoint
-currentTextPoint = StringParser $ ParseOK . parserTextPoint <$> get
+currentTextPoint :: Monad m => StringParser m TextPoint
+currentTextPoint = StringParser $ ParseOK . (^. parserCursor) <$> get
 
 -- | This class is instantiated by both of the parsing monads defined in this module.
 class Monad m => PointParser m where
@@ -296,7 +290,7 @@ class Monad m => PointParser m where
   -- start of a token without using the '<?>' combinator.
   parserResetStartPoint :: m ()
 
-instance Monad m => PointParser (StringParser str m) where
+instance Monad m => PointParser (StringParser m) where
   parserResetStartPoint =
     currentTextPoint >>=
     StringParser .
@@ -307,7 +301,7 @@ instance Monad m => PointParser (StringParser str m) where
 
 -- Instantiation of the type classes from the @parsers@ package.
 
-instance (Monad m, StringLength str) => Parsing (StringParser str m) where
+instance Monad m => Parsing (StringParser m) where
 
   try p =
     getParserState >>= \ st ->
@@ -334,43 +328,41 @@ instance (Monad m, StringLength str) => Parsing (StringParser str m) where
   unexpected msg = throwError $ Strict.pack $ "unexpected " <> msg
 
   eof = do
-    (i, str, isEOF) <-
+    (stream, isEOF) <-
       StringParser $
-      (\ st ->
-        ParseOK
-        ( theParserIndex st
-        , theParserString st
-        , theParserIsEOF st
-        )
-      ) <$> get
-    guard $ isEOF && i >= stringLength str
+      (\ st -> ParseOK ( theParserStream st , theParserIsEOF st)) <$>
+      get
+    case getCharStream stream of
+      Nothing | isEOF -> pure ()
+      _ -> empty
 
-instance
-  (MonadIO m, StringLength str, IOIndexableString str)
-  => CharParsing (StringParser str m) where
+instance Monad m => CharParsing (StringParser m) where
 
     satisfy ok =
       ( StringParser $
         (\ st ->
-          ParseOK (theParserIndex st, theParserString st)
+          ParseOK (theParserStream st, theParserIsEOF st)
         ) <$> get
-      ) >>= \ (i, str) ->
-      if i >= stringLength str then
-        StringParser $ pure $ ParseWait $ satisfy ok
-      else
-        liftIO (charAtIndexIO str i) >>= \ c ->
-        if ok c then
-          StringParser
-          ( ParseOK <$>
-            ( parserIndex += 1 >>
-              parserCharCount += 1
-            )
-          ) *> pure c
-        else empty
+      ) >>= \ (stream, isEOF) ->
+      case getCharStream stream of
+        Nothing -> 
+          if isEOF then empty else
+          StringParser $ pure $ ParseWait $ satisfy ok
+        Just  c ->
+          if ok c then
+            StringParser
+            ( ParseOK <$>
+              ( parserStream .= stepCharStream stream >>
+                parserColumn += 1
+              )
+            ) *> pure c
+          else empty
 
-instance (Monad m, StringLength str) => LookAheadParsing (StringParser str m) where
+instance Monad m => LookAheadParsing (StringParser m) where
 
   lookAhead = (getParserState >>=) . (. putParserState) . (<*)
+
+instance Monad m => TokenParsing (StringParser m)
 
 ----------------------------------------------------------------------------------------------------
 
@@ -385,7 +377,7 @@ newtype Parser fold tags a
     { unwrapParser ::
         ReaderT
         (TextBuffer tags)
-        (StringParser (TextLine tags) (StateT fold IO))
+        (StringParser (StateT (ParserState fold tags) IO))
         a
     }
   deriving
@@ -398,7 +390,9 @@ instance MonadFail (Parser fold tags) where
   fail = throwError . Strict.pack
 
 instance MonadState fold (Parser fold tags) where
-  state = Parser . lift . lift . state
+  state f = Parser $ lift $ lift $ state $ \ st ->
+    let (a, fold) = f $ st ^. parserFoldFold in
+    (a, parserFoldFold .~ fold $ st)
 
 instance MonadError Strict.Text (Parser fold tags) where
   throwError = Parser . lift . throwError
@@ -407,34 +401,45 @@ instance MonadError Strict.Text (Parser fold tags) where
     catchError (runReaderT try env) $ \ err ->
     runReaderT (unwrapParser $ catch err) env
 
+data ParserState fold tags
+  = ParserState
+    { theParserStateFold :: !fold
+    , theParserStateLine :: !(TextLine tags)
+    }
+
+parserFoldFold :: Lens' (ParserState fold tags) fold
+parserFoldFold = lens theParserStateFold $ \ a b -> a{ theParserStateFold = b }
+
+parserFoldLine :: Lens' (ParserState fold tags) (TextLine tags)
+parserFoldLine = lens theParserStateLine $ \ a b -> a{ theParserStateLine = b }
+
 -- | Information about a 'Parser' failure occuring as a result of 'runParser' or
 -- 'runParserOnRange'. This information is extracted from the 'StringParserResult'.
 data ParserResult fold tags a
   = ParserResult
-    { theParserState :: !(StringParserState (TextLine tags))
+    { theParserState :: !StringParserState
+    , theParserLine :: !(TextLine tags)
     , theParserFold :: !fold
     , theParserResult :: !(Either Strict.Text a)
     }
 
 -- | Evaluate a 'StringParser' function in the current 'Parser' function context.
-liftStringParser :: StringParser (TextLine tags) (StateT fold IO) a -> Parser fold tags a
+liftStringParser
+  :: StringParser (StateT (ParserState fold tags) IO) a
+  -> Parser fold tags a
 liftStringParser = Parser . lift
-
--- | Not for export. Evaluate a 'State' function that can inspect or modify the 'StringParserState'
--- of the current 'Parser' function context.
-onParserState :: State (StringParserState (TextLine tags)) a -> Parser fold tags a
-onParserState = Parser . lift . onStringParserState
 
 -- | Perform some update on the @tags@ value of the current 'TextLine' that is being inspected by
 -- the 'Parser'. This function obviously is specific to this 'Parser' and is not portable, but it is
 -- the means by which you can assign tags denoting parts of syntax to a line of text ('TextLine') in
 -- the current text buffer.
 modifyTags :: (Maybe tags -> Maybe tags) -> Parser fold tags ()
-modifyTags f = onParserState $ parserString . textLineTags %= f
+modifyTags f = Parser $ lift $ lift $ parserFoldLine . textLineTags %= f
 
 -- | Like 'runParserOnRange', but evaluates the 'Parser' on the whole 'TextBuffer'.
 runParser
-  :: Bool
+  :: Eq (TextLine tags)
+  => Bool
   -> fold
   -> Parser fold tags a
   -> EditText tags [ParserResult fold tags a]
@@ -460,72 +465,78 @@ runParser doRepeat fold p0 =
 -- character after the previous 'Parse' completed if the first 'Bool' argument given to this
 -- function is 'True'.
 runParserOnRange
-  :: Bool
+  :: forall fold tags a
+  . Eq (TextLine tags)
+  => Bool
   -> fold
   -> TextRange TextPoint
   -> Parser fold tags a
   -> EditText tags [ParserResult fold tags a]
 runParserOnRange doRepeat fold range p0 =
-  if firstRow > lastRow then pure []
-  else if firstRow == lastRow then
-    if firstColumn < lastColumn then pure [] else
-    getLineIndex firstRow >>= \ line ->
-    init $
-    cutFromEnd (unCharIndex lastColumn) $
-    cutFromStart (unCharIndex firstColumn) $
-    line
-  else
-    getLineIndex firstRow >>= init
+  if  firstRow > lastRow ||
+      firstRow == lastRow && firstColumn < lastColumn
+  then pure []
+  else getLineIndex firstRow >>= init
   where
-  init line =
-    loop id fold p0 $
-    (stringParserState line)
-    { theParserLineIndex = firstRow
-    , theParserIndex = unwrapIndex (fromIndex firstColumn)
-    , theParserStartPoint =
-        TextPoint
-        { theTextPointRow = firstRow
-        , theTextPointColumn = firstColumn
-        }
-    }
-  unCharIndex = unwrapIndex . fromIndex :: CharIndex -> Int
   TextPoint{theTextPointRow=firstRow, theTextPointColumn=firstColumn} = theTextRangeStart range
   TextPoint{theTextPointRow=lastRow , theTextPointColumn=lastColumn } = theTextRangeEnd   range
-  loop stack fold (Parser p) parst =
-    get >>= \ editor ->
-    liftIO
-    ( runStateT
-      ( runStringParser
-        (runReaderT p editor)
-        parst
-      )
-      fold
-    ) >>= \ ((result, parst), fold) ->
+  start =
+    TextPoint
+    { theTextPointRow = firstRow
+    , theTextPointColumn = firstColumn
+    }
+  init :: TextLine tags -> EditText tags [ParserResult fold tags a]
+  init line =
+    loop id p0
+    (ParserState{ theParserStateFold = fold, theParserStateLine = line }) $
+    stringParserState
+    { theParserStream = toCharStream (unwrapIndex $ fromIndex firstColumn) line
+    , theParserCursor = start
+    , theParserStartPoint = start
+    }
+  loop
+    :: ([ParserResult fold tags a] -> [ParserResult fold tags a])
+    -> Parser fold tags a
+    -> ParserState fold tags
+    -> StringParserState
+    -> EditText tags [ParserResult fold tags a]
+  loop stack (Parser p) fold parst = do
+    editor <- get
+    ((result, parst), fold) <- liftIO $
+      runStateT (runStringParser (runReaderT p editor) parst) fold
+    let elem =
+          ParserResult
+          { theParserState = parst
+          , theParserLine = theParserStateLine fold
+          , theParserFold = theParserStateFold fold
+          , theParserResult = Left ""
+          }
     case result of
-      NoMatch         -> pure $ stack . ((ParserResult parst fold $ Left "") :) $ []
-      ParseError err  -> pure $ stack . ((ParserResult parst fold $ Left err) :) $ []
+      NoMatch         -> pure $ stack . (elem :) $ []
+      ParseError err  -> pure $ stack . ((elem{ theParserResult = Left err }) :) $ []
       ParseOK    a    ->
         if doRepeat then
-          loop (stack . ((ParserResult parst fold $ Right a) :)) fold p0 parst
+          loop (stack . ((elem{ theParserResult = Right a }) :)) p0 fold parst
         else
-          pure $ stack . ((ParserResult parst fold $ Right a) :) $ []
+          pure $ stack . ((elem{ theParserResult = Right a }) :) $ []
       ParseWait  p    ->
-        if theParserLineIndex parst >= lastRow then
+        if (parst ^. parserRow) >= lastRow then
           if theParserIsEOF parst then
-            pure $ stack . ((ParserResult parst fold $ Left "unexpected EOF") :) $ []
+            pure $ stack . ((elem{ theParserResult = Left "unexpected EOF" }) :) $ []
           else
-            loop stack fold (Parser $ lift p) (parst{ theParserIsEOF = True })
+            loop stack (Parser $ lift p) fold (parst{ theParserIsEOF = True })
         else
-          let nextRow = theParserLineIndex parst + 1 in
+          let nextRow = (parst ^. parserRow) + 1 in
           getLineIndex nextRow >>= \ line ->
-          loop stack fold (Parser $ lift p) $
+          loop stack (Parser $ lift p) fold $
           parst
-          { theParserString =
-              if nextRow < lastRow then line else
-              cutFromEnd (unCharIndex lastColumn) line
-          , theParserLineIndex = nextRow
-          , theParserIndex = 0
+          { theParserStream = charStreamAppend (theParserStream parst) line
           , theParserIsEOF = nextRow >= lastRow
+          , theParserCursor =
+              TextPoint
+              { theTextPointRow = nextRow
+              , theTextPointColumn = 1
+              }
           }
 
 ----------------------------------------------------------------------------------------------------
@@ -556,3 +567,5 @@ instance CharParsing (Parser fold tags) where
 
 instance PointParser (Parser fold tags) where
   parserResetStartPoint = liftStringParser parserResetStartPoint
+
+instance TokenParsing (Parser fold tags)
