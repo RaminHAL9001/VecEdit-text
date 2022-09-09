@@ -37,7 +37,7 @@ import VecEdit.Text.String
     EditLineResult(..),
     columnNumber, minCharIndex, maxCharIndex,
     IOByteStream(..), emptyTextLine,
-    streamFoldLines, newReadLinesState,
+    streamFoldLines, newEditStreamState,
   )
 import VecEdit.Vector.Editor (liftEditor, currentBuffer, putElemAt, printOverIOBuffer)
 import qualified VecEdit.Vector.Editor.GapBuffer as GapBuf
@@ -181,7 +181,7 @@ evalEditText = fmap (fmap fst) . runEditText
 loadStreamEditText :: forall stream tags . IOByteStream stream => stream -> EditText tags ()
 loadStreamEditText handle =
   liftEditLine $
-  newReadLinesState () >>=
+  newEditStreamState () >>=
   void .
   streamFoldLines handle (const $ lineBreak Before)
 

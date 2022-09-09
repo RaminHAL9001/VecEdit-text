@@ -1,26 +1,26 @@
--- | this module provides type classes and instances for a consistent interface for all the various
--- string types that Haskell provides, and APIs to convert between string types easily. There is
+-- | this module provides type classes and instances  for a consistent interface for all the various
+-- string types  that Haskell provides, and  APIs to convert  between string types easily.  There is
 -- also a catch-all string type called 'StringData' which can assume any of the supported encodings:
 --
 --  - @String@ -- lists of characters
---
+-- 
 --  - Strict and lazy 'Strict.Text' -- a sequence 16-bit wide words encoding a string of UTF-16
 --  - 'Char's.
---
---  - Strict and lazy 'Char 'CBytes.ByteString' -- a sequence of 8-bit wide words encoding a string
---  - of ASCII-only (no UTF) characters.
---
+-- 
+--  - Strict and lazy 'Char 'CBytes.ByteString' -- a  sequence of 8-bit wide words encoding a string
+--    of ASCII-only (no UTF) characters.
+-- 
 --  - Strict and lazy UTF-8 encoded 'UTF8String.ByteString'.
---
+-- 
 --  - Unboxed 'UVec.Vector's of 8-bit 'Char' values (ASCII-only, no UTF).
---
+-- 
 --  - Unboxed 'UVec.Vector's of 32-bit wide UTF 'Char' values (UTF-32 encoded strings).
 --
--- Sorry, but 'UVec.Vectors' encoding 24-bit wide UTF 'Char' values are not supported as this
+-- Sorry,  but 'UVec.Vectors'  encoding 24-bit  wide UTF  'Char' values  are not  supported as  this
 -- encoding not used very often.
 --
 -- There is also the 'IOByteStream' APIs for constructing strings from file 'Handle's as a stream of
--- bytes encoding a string of UTF-8 characters, and the 'EditLine' API for constructing strings
+-- bytes encoding  a string  of UTF-8 characters,  and the 'EditLine'  API for  constructing strings
 -- using a 'GapBuffer'.
 module VecEdit.Text.String
   ( -- ** String data types
@@ -49,7 +49,7 @@ module VecEdit.Text.String
       ),
     defaultEditLineLiftResult,
     insertString, insert, joinLine, newline, lineBreak, copyBufferClear,
-    EditLine(..), EditLineState, newEditLineState, runEditLine, streamEditor,
+    EditLine(..), LineBuffer, EditLineState, newEditLineState, runEditLine, streamEditor,
     EditLineResult(..), editLineUTFWeight, onEditLineState, catchEditLineResult,
     maxCharIndex, minCharIndex, columnNumber,
     editLineTokenizer, editLineBreakSymbol, editLineLiftResult,
@@ -57,10 +57,10 @@ module VecEdit.Text.String
     IOByteStream(..), EditorStream,
     newEditorStream, streamByteString, streamLazyByteString,
     -- *** Iterating over decoded strings
-    ReadLines(..), ReadLinesState, HaltReadLines, HandleUTFDecodeError,
-    newReadLinesState, readLinesState, runReadLines,
+    EditStream(..), EditStreamState, HaltEditStream, HandleUTFDecodeError,
+    newEditStreamState, editStreamState, runEditStream,
     hFoldLines, streamFoldLines, hSetByteStreamMode,
-    byteStreamDecode, hReadLineBufferSize,
+    byteStreamDecode, hEditStreamBufferSize,
     -- *** UTF-8 Decoding
     UTF8Decoder(..), utf8Decoder, utf8DecoderPushByte,
     UTF8DecodeTakeChar, UTF8DecodeStep, UTF8DecodeTakeError, utf8ErrorDecompose,
@@ -134,7 +134,7 @@ import System.IO
 type UVector = UVec.Vector
 type CharVector = UVector Char
 
--- | This is an unsigned 8-bit word, enough to hold a single ASCII value. This is much smaller than
+-- | This is an unsigned 8-bit word, enough to  hold a single ASCII value. This is much smaller than
 -- Haskell's built-in 'Char' which supports the UTF character set.
 type Char8 = Word8
 
@@ -148,9 +148,9 @@ instance Show ByteVector where
 byteVectorSize :: ByteVector -> VectorSize
 byteVectorSize (ByteVector str) = UVec.length str
 
--- | Convert a 'Char' to a 'Char8' by throwing away the upper bits of the 'ord' of the 'Char'. You
--- lose information when you do this, so avoid doing it. The functionality in this module do a good
--- job of keeping track of converting between 'Char' sequence encodings and byte sequence encodings
+-- | Convert a 'Char' to  a 'Char8' by throwing away the upper bits of the  'ord' of the 'Char'. You
+-- lose information when you do this, so avoid doing  it. The functionality in this module do a good
+-- job of keeping track of converting between  'Char' sequence encodings and byte sequence encodings
 -- so as not to lose information.
 toChar8Lossy :: Char -> Char8
 toChar8Lossy = fromIntegral . ord
@@ -175,10 +175,10 @@ instance UTF8Bytes ByteVector Int where
 
 -- | This data type encompasses all of Haskell's major immutable text/string data types.
 --
--- Note that this data type does instantiate the 'Eq' typeclass, but two strings are only equal if
--- they have the exact same encoding. So @'(==)'@ on 'StringData' is __NOT__ the same as testing if
--- two strings are equal, it is testing if two strings are equal and have the same encoding. So the
--- semantics of the 'StringData' data type is an expression of both a string and also how it is
+-- Note that this data  type does instantiate the 'Eq' typeclass, but two  strings are only equal if
+-- they have the exact same encoding. So @'(==)'@  on 'StringData' is __NOT__ the same as testing if
+-- two strings are equal, it is testing if two  strings are equal and have the same encoding. So the
+-- semantics of  the 'StringData' data type  is an expression  of both a  string and also how  it is
 -- formatted in memory.
 data StringData
   = StringUndefined
@@ -198,7 +198,7 @@ instance Show StringData where
 
 instance IsString StringData where { fromString = toStringData . Just; }
 
--- | Finding the number of 'Char' values encoded into a string-like data structure. Functions
+-- |  Finding the  number of  'Char' values  encoded into  a string-like  data structure.  Functions
 -- instantiating this typeclass which may require scanning the entire string.
 class StringLength   t where { stringLength :: t -> Int; }
 
@@ -208,15 +208,15 @@ class FromStringData t where { fromStringData :: StringData -> Maybe t; }
 -- | Data structures that can be converted to a 'StringData'.
 class ToStringData   t where { toStringData   :: Maybe t -> StringData; }
 
--- | Convert from one string type to another. Be warned that this may cause space leaks when using
--- the usual 'String' data type, as all 'String' values are first converted to a @('UVec.Vector'
--- 'Char')@ type first, which consumes the entire 'String' and store it in memory, before
+-- | Convert from one string  type to another. Be warned that this may  cause space leaks when using
+-- the usual  'String' data type, as  all 'String' values  are first converted to  a @('UVec.Vector'
+-- 'Char')@  type  first,  which consumes  the  entire  'String'  and  store it  in  memory,  before
 -- re-encoding it as some other string type.
 tryConvertString :: (ToStringData a, FromStringData b) => a -> Maybe b
 tryConvertString = fromStringData . toStringData . Just
 
--- | An non-total version of 'tryConvertString', i.e. it evaluates to
--- an 'error' if 'tryConvertString' evaluates to 'Nothing'.
+-- |  An   non-total  version   of  'tryConvertString',   i.e.  it  evaluates   to  an   'error'  if
+-- 'tryConvertString' evaluates to 'Nothing'.
 convertString :: (ToStringData a, FromStringData b) => a -> b
 convertString =
   maybe (error "convertString: fromStringData evaluates to undefined") id .
@@ -373,7 +373,7 @@ putFoldable = hPutFoldable stdout
 
 ----------------------------------------------------------------------------------------------------
 
--- | Similar to a 'String', but optimized for parsing. Use the 'toCharStream' function to convert
+-- | Similar to  a 'String', but optimized  for parsing. Use the 'toCharStream'  function to convert
 -- some kind of string into a 'CharStream'.
 data CharStream
   = CharStream
@@ -418,8 +418,8 @@ getCharStream st =
 charStreamAppend :: CharStreamable string => CharStream -> string -> CharStream
 charStreamAppend = toCharStream . getCharStreamCount
 
--- | Fold an accumulating function over all characters in a 'CharStream' to produce an accumulated
--- value of type @accum@. The accumulating function also takes the index value returned by calling
+-- | Fold an accumulating  function over all characters in a 'CharStream'  to produce an accumulated
+-- value of type @accum@.  The accumulating function also takes the index  value returned by calling
 -- 'getCharStreamCount' on the 'CharStream'
 indexFoldCharStream :: (Int -> Char -> accum -> accum) -> CharStream -> accum -> accum
 indexFoldCharStream f st accum = case getCharStream st of
@@ -433,7 +433,7 @@ indexFoldCharStream f st accum = case getCharStream st of
 foldCharStream :: (Char -> accum -> accum) -> CharStream -> accum -> accum
 foldCharStream = indexFoldCharStream . const
 
--- | Runs 'foldCharStream' on a @string@ that instantiates the 'CharStreamable' class. This
+-- |  Runs  'foldCharStream' on  a  @string@  that  instantiates  the 'CharStreamable'  class.  This
 -- basically calls 'foldCharStream' on the result of 'toCharStream'.
 indexFoldStreamable
   :: CharStreamable string
@@ -448,9 +448,9 @@ foldStreamable
   -> string -> accum -> accum
 foldStreamable f = foldCharStream f . toCharStream 0
 
--- | Construct a 'CharStream' passing the current 'Char', and a lazily-evaluated 'CharStream' to
--- produce the next character, which might be 'charStreamFinal' if the given 'Char' is the last
--- one. The 'Int' argument is the number of characters that have been consumed, so it is expected
+-- | Construct  a 'CharStream' passing  the current 'Char',  and a lazily-evaluated  'CharStream' to
+-- produce the  next character, which  might be  'charStreamFinal' if the  given 'Char' is  the last
+-- one. The 'Int'  argument is the number of  characters that have been consumed, so  it is expected
 -- that you use this function in a loop in which you are keeping track of the number of characters.
 charStreamSetChar :: Int -> Char -> CharStream -> CharStream
 charStreamSetChar count c ~next = CharStream
@@ -459,7 +459,7 @@ charStreamSetChar count c ~next = CharStream
   , stepCharStream = next
   }
 
--- | Construct an empty 'CharStream' in which 'getCharStream' always produces 'Nothing'. Like with
+-- | Construct an  empty 'CharStream' in which 'getCharStream' always  produces 'Nothing'. Like with
 -- 'charStreamSetChar', it is expected that you use this function in a loop in which you are keeping
 -- track of the number of characters.
 charStreamSetEnd :: Int -> CharStream
@@ -469,9 +469,9 @@ charStreamSetEnd i = CharStream
   , stepCharStream = charStreamSetEnd i
   }
 
--- | Constructs a 'CharStream' from UTF8-encoded characters that have been stored in either a lazy
--- 'LazyBytes.ByteString' or strict 'ByteString'. This function is used to instantiate
--- 'toCharStream' for both lazy 'LazyBytes.ByteString's and strict 'ByteString's, so the
+-- | Constructs a 'CharStream'  from UTF8-encoded characters that have been stored  in either a lazy
+-- 'LazyBytes.ByteString'   or  strict   'ByteString'.  This   function  is   used  to   instantiate
+-- 'toCharStream'  for   both  lazy  'LazyBytes.ByteString's   and  strict  'ByteString's,   so  the
 -- 'toCharStream' function is a more general type of this function.
 charStreamUTF8Bytes :: UTF8Bytes bytestring s => Int -> bytestring -> CharStream
 charStreamUTF8Bytes i str = case UTF8.decode str of
@@ -490,9 +490,11 @@ charStreamVector chr count str = loop count 0 where
     (chr $ UVec.unsafeIndex str i)
     ((loop $! count + 1) $! i + 1)
 
+-- | This is a typeclass of string types  that can produce streams of characters. In particular this
+-- is useful for parsing, and is used by the "VecEdit.Text.Parser" module.
 class CharStreamable str where
 
-  -- | Convert a string to a 'CharStream'. Pass the initial 'Int' value, which should be 0 if you
+  -- | Convert a string  to a 'CharStream'. Pass the  initial 'Int' value, which should be  0 if you
   -- are initializing this 'CharStream' at the beginning of the string.
   toCharStream :: Int -> str -> CharStream
 
@@ -542,8 +544,8 @@ instance CharStreamable (TextLine tags) where
 
 ----------------------------------------------------------------------------------------------------
 
--- | A class of string data types that can be indexed, retriving a 'Char' at some 'Int' position
--- from the start of the @str@ string. As a law, instances of this type class must be able to index
+-- | A class  of string data types  that can be indexed,  retriving a 'Char' at  some 'Int' position
+-- from the start of the @str@ string. As a law,  instances of this type class must be able to index
 -- a @str@ data type in O(1) time.
 class IndexableString str where
   charAtIndex :: str -> Int -> Char
@@ -583,31 +585,31 @@ instance IOIndexableString StringData where
 
 ----------------------------------------------------------------------------------------------------
 
--- | This data type contains a string read from a character string and possibly terminated by a line
--- breaking character. The string is guaranteed to have no more than 1 line breaking character, and
--- the break is guaranteed to exist only at the end of the line. 'TextLine's are constructed by
--- functions of the 'EditLine' type, or the 'streamFoldLines' function and it's associates.
+-- | This data type contains a string that is guarnateed to contain exactly zero or exactly one line
+-- breaking  characters, and  the  break  is guaranteed  to  exist  only at  the  end  of the  line.
+-- 'TextLine's  are constructed  by  functions  of the  'EditLine'  type,  or the  'streamFoldLines'
+-- function and it's associates.
 --
--- A 'TextLine' by default will encode strings as 'ByteVector's, but will automatically detect UTF8
--- encoded text, and if any character @c@ exists in the stream that does not satisfy the 'isAscii'
--- predicate (where @ord c > 127@), the internal buffer is converted from 'ByteVector' to an unboxed
--- @('Vector' 'Char')@, a.k.a. 'CharVector'.
+-- A  'TextLine' by  default will  encode strings  as 'ByteVector's,  but will  automatically detect
+-- non-ASCII characters -- any 'Char' that does not  satisfy the 'isAscii' predicate, where @ord c >
+-- 127@. If  non-ASCII characters exist,  the internal buffer is  converted from 'ByteVector'  to an
+-- unboxed @('Vector' 'Char')@, a.k.a. 'CharVector'.
 --
--- The @tags@ type variable allows you to store annotation data along with this string, which is a
--- feature used more by the "VecEdit.Text.Editor" module for storing intermediate parser states
--- when analyzing source code, or attaching text properties like colors or font faces.
+-- The @tags@ type variable  allows you to store annotation data along with  this string, which is a
+-- feature used more by the "VecEdit.Text.Editor" module for storing intermediate parser states when
+-- analyzing source code, or attaching text properties like colors or font faces.
 --
--- 'TextLine' should not be used as a string, it contains additional information about the line
--- break such that the internal representation, which is of type 'StringData', might be slightly
--- different from the original string that encoded it. The internal represntation always drops line
+-- 'TextLine' should  not be used  as a  string, it contains  additional information about  the line
+-- break such  that the internal  representation, which is of  type 'StringData', might  be slightly
+-- different from the original string that encoded  it. The internal represntation always drops line
 -- breaking characters, even if the original string encoding used a @"\\n\\r"@ or @"\\r\\n"@ pair of
 -- characters to encode the line break. The line break is stored as 'LineBreakSymbol' retrieved with
 -- the 'theTextLineBreak' function.
 --
--- The originally encoded string value can still be retrieved using 'foldString', which folds over
--- the original line breaking characters at the end of the string (if any). The 'stringLength'
--- function also returns the "true" length of the original string encoding, counting 2 characters
--- for a line break if @"\\n\\r"@ or @"\\r\\n"@ were used to encode the line break. For the length
+-- The originally encoded string  value can still be retrieved using  'foldString', which folds over
+-- the original  line breaking  characters at  the end of  the string  (if any).  The 'stringLength'
+-- function also returns  the "true" length of  the original string encoding,  counting 2 characters
+-- for a line break if  @"\\n\\r"@ or @"\\r\\n"@ were used to encode the  line break. For the length
 -- of the internal representation, without the line breaks, use 'textLineContentLength'.
 data TextLine tags
   = TextLine
@@ -673,7 +675,7 @@ textLineUTFWeight txt = case theTextLineData txt of
   TextLineBytes{}   -> 0
   TextLineChars w _ -> w
 
--- | Retrieve the internal 'TextLine' data, which does not contain any line break. Use
+-- |  Retrieve  the  internal  'TextLine'  data,  which   does  not  contain  any  line  break.  Use
 -- 'convertString' or 'foldString' to produce the original string with line breaks.
 textLineData :: TextLine tags -> StringData
 textLineData txt = case theTextLineData txt of
@@ -721,8 +723,8 @@ stringDataGetChar str i = case str of
 
 ----------------------------------------------------------------------------------------------------
 
--- | This class defines functions for taking a part of a string from a given 'VectorIndex', toward
--- the start or end of a string. If the given 'VectorIndex' is too big, an empty string is
+-- | This class defines  functions for taking a part of a string  from a given 'VectorIndex', toward
+-- the  start or  end of  a  string. If  the given  'VectorIndex' is  too  big, an  empty string  is
 -- returned. If the given 'VectorIndex' is too small, the string is returned unmodified.
 class CuttableString str where
   -- | Remove characters from the start of the string up to the given 'VectorIndex'.
@@ -768,58 +770,58 @@ uvecCutFromEnd i vec = UVec.take (UVec.length vec - i) vec
 
 ----------------------------------------------------------------------------------------------------
 
--- | This module provides the 'EditLine' function type and several useful APIs of this
--- type. However, it might be useful to use these same APIs to produce functions types other than
+-- |  This  module  provides  the  'EditLine'  function   type  and  several  useful  APIs  of  this
+-- type. However, it  might be useful to use  these same APIs to produce functions  types other than
 -- 'EditLine', for example 'VecEdit.Text.Editor.EditText' in the "VecEdit.Text.Editor" module.
 --
 -- The minimal complete definition is 'liftEditLine'. But every kind of editor can plauisbly provide
--- completely different functionality for each of these APIs depending on the memory model used for
+-- completely different functionality for each of these  APIs depending on the memory model used for
 -- line buffering.
 --
--- The biggest difference between various instances of 'LineEditor' is the memory model used for
--- line buffering. The most primitive instance of 'LineEditor' is the 'EditLine' function type,
--- which does no line buffering, only character buffering. The 'ReadLines' function type provides a
--- 'Before' stack and 'After' stack but no random access of stack elements. The
--- 'VecEdit.Text.Editor.EditText' function provides a random access
--- 'VecEdit.Vector.Editor.GapBuffer.GapBuffer' so the cursor can efficiently move anywhere in the
+-- The biggest  difference between various  instances of 'LineEditor' is  the memory model  used for
+-- line buffering.  The most  primitive instance  of 'LineEditor' is  the 'EditLine'  function type,
+-- which does no line buffering, only character buffering. The 'EditStream' function type provides a
+-- 'Before'   stack   and  'After'   stack   but   no  random   access   of   stack  elements.   The
+-- 'VecEdit.Text.Editor.EditText'        function       provides        a       random        access
+-- 'VecEdit.Vector.Editor.GapBuffer.GapBuffer' so  the cursor can  efficiently move anywhere  in the
 -- buffer at any time.
 class LineEditor (editor :: * -> * -> *) where
 
   -- | Lift an 'EditLine' function into the @editor@ function.
   liftEditLine :: Monad (editor tags) => EditLine tags a -> editor tags a
 
-  -- | Lift a given 'EditLineResult' result into the @editor@ monad. If the 'EditLineResult' is
+  -- | Lift a  given 'EditLineResult'  result into  the @editor@ monad.  If the  'EditLineResult' is
   -- @('EditLineOK' a)@, this is the same as @('return' a)@ or @('pure' a)@. If the 'EditLineResult'
-  -- is @('EditLineFail' err)@, this is the same as @@'throwError' err)@. You can instantiate this
-  -- function with 'defaultEidtLineLiftResult' if your @editor@ monad instantiates the 'MonadError'
+  -- is @('EditLineFail' err)@, this  is the same as @@'throwError' err)@.  You can instantiate this
+  -- function with 'defaultEidtLineLiftResult' if your  @editor@ monad instantiates the 'MonadError'
   -- class over the 'EditTextError' type.
   editLineLiftResult :: EditLineResult editor tags a -> editor tags a
 
   -- | Count the number of lines 'Before' or 'After' the cursor.
   --
-  -- The most primitive instance of 'LineEditor', the 'EditLine' function type, instantiates
+  -- The  most  primitive instance  of  'LineEditor',  the  'EditLine' function  type,  instantiates
   -- 'countLines' with a function that simply always returns a value of zero. But other instances of
-  -- 'LineEditor' can provide instances of 'countLines' that can return non-zero values. For
+  -- 'LineEditor'  can provide  instances  of  'countLines' that  can  return  non-zero values.  For
   -- example, the 'VecEdit.Text.Editor.EditText' provides provides the ability to edit many lines of
-  -- text in a buffer, as well move around randomly in the buffer, so the 'countLines' instance is
+  -- text in a buffer,  as well move around randomly in the buffer,  so the 'countLines' instance is
   -- of more consequence for the 'VecEdit.Text.Editor.EditText' function type.
   countLines :: Monad (editor tags) => editor tags VectorSize
   countLines = pure 0
 
-  -- | Ask the evaluation context to store a 'TextLine' 'Before' (above) or 'After' (below) the
+  -- | Ask the  evaluation context  to store a  'TextLine' 'Before' (above)  or 'After'  (below) the
   -- current line.
   pushLine :: Monad (editor tags) => RelativeDirection -> TextLine tags -> editor tags ()
   pushLine = (.) liftEditLine . pushLine
 
-  -- | Ask the evaluation context to remove a 'TextLine' from above ('Before') or below ('After')
+  -- | Ask the evaluation  context to remove a  'TextLine' from above ('Before')  or below ('After')
   -- the cursor.
   popLine :: Monad (editor tags) => RelativeDirection -> editor tags (TextLine tags)
   popLine = liftEditLine . popLine
 
   -- | Insert a 'TextLine' into the current buffer at the either end of the buffer (depending on the
-  -- 'RelativeDirection'). This function is intended to be used as a primitive step in the
-  -- 'joinLine' function, the difference between this and 'joinLine' is that it joins an arbitrary
-  -- given 'TextLine', rather than the next or previous line in the editor context. See also: the
+  -- 'RelativeDirection').  This  function is  intended  to  be used  as  a  primitive step  in  the
+  -- 'joinLine' function, the difference  between this and 'joinLine' is that  it joins an arbitrary
+  -- given 'TextLine', rather  than the next or previous  line in the editor context.  See also: the
   -- 'insertLineHere' function inserts a 'TextLine' at the cursor position.
   --
   -- If inserting 'Before' the given 'TextLine' has it's line break removed before inserting. If
@@ -838,13 +840,13 @@ class LineEditor (editor :: * -> * -> *) where
     => RelativeDirection -> TextLine tags -> editor tags ()
   insertLineHere = (.) liftEditLine . insertLineHere
 
-  -- | Insert the given 'Char', if the 'Char' is the ASCII "line feed" @'\\n'@ (a.k.a. @'\\LF'@)
+  -- | Insert the  given 'Char', if the  'Char' is the  ASCII "line feed" @'\\n'@  (a.k.a. @'\\LF'@)
   -- character, the 'EditLine' function halts in the @'EditLinePush' 'Before'@ state, returning with
   -- it a 'TextLine'.
   pushChar :: Monad (editor tags) => RelativeDirection -> Char -> editor tags ()
   pushChar = (.) liftEditLine . pushChar
 
-  -- | This is the inverse of 'pushChar', tries to remove a character from 'Before' or 'After' the
+  -- | This is the inverse  of 'pushChar', tries to remove a character from  'Before' or 'After' the
   -- cursor. If there are no characters left, 'joinLine' is evaluated and 'popChar' tries again.
   popChar :: Monad (editor tags) => RelativeDirection -> editor tags Char
   popChar = liftEditLine . popChar
@@ -853,14 +855,15 @@ class LineEditor (editor :: * -> * -> *) where
   countChars :: Monad (editor tags) => RelativeDirection -> editor tags VectorSize
   countChars = liftEditLine . countChars
 
-  -- | Similar to 'popChar' but behaves differently when the cursor is at either end of the line
-  -- buffer and there are no characters to be popped: rather than evaluate 'joinLine' when at the end
-  -- of the line buffer, this function simply returns 'Nothing'.
+  -- | Similar to  'popChar' but behaves differently  when the cursor is  at either end of  the line
+  -- buffer and there  are no characters to be  popped: rather than evaluate 'joinLine'  when at the
+  -- end of the 'EditLine' buffer, this function simply returns 'Nothing'.
   tryPopChar :: Monad (editor tags) => RelativeDirection -> editor tags (Maybe Char)
   tryPopChar = liftEditLine . tryPopChar
 
-  -- | Construct a 'TextLine' from the portion of the 'EditLine' buffer 'Before' or 'After' the
-  -- cursor, clear that portion of the buffer, and then return the constructed 'TextLine'.
+  -- | Construct a  'TextLine' from  the portion of  the 'EditLine' buffer  'Before' or  'After' the
+  -- cursor,  clear  that  portion  of  the  'EditLine' buffer,  and  then  return  the  constructed
+  -- 'TextLine'.
   copyLine :: Monad (editor tags) => RelativeDirection -> editor tags (TextLine tags)
   copyLine = liftEditLine . copyLine
 
@@ -868,7 +871,8 @@ class LineEditor (editor :: * -> * -> *) where
   cutLine :: Monad (editor tags) => RelativeDirection -> editor tags (TextLine tags)
   cutLine = liftEditLine . cutLine
 
-  -- | Copy the whole 'LineEditState' buffer into a 'TextString', but do not clear the buffer.
+  -- | Copy the whole  'LineEditState' buffer into a  'TextString', but do not  clear the 'EditLine'
+  -- buffer.
   copyBuffer :: Monad (editor tags) => editor tags (TextLine tags)
   copyBuffer = liftEditLine copyBuffer
 
@@ -876,11 +880,11 @@ class LineEditor (editor :: * -> * -> *) where
   clearBuffer :: Monad (editor tags) => editor tags ()
   clearBuffer = liftEditLine clearBuffer
 
-  -- | Shift the cursor by a 'RelativeIndex'. Negative numbers indicate motion in the direction
-  -- 'Before' the cursor, positive numbers indicate motion in the direction 'After' the cursor. The
-  -- number of characters shifted is returned. If the cursor is at the start of the line and a
-  -- negative 'RelativeIndex' is given 'Nothing' is returned. If the cursor is at the end of the line
-  -- and a positive 'RelativeIndex' is given 'Nothing' is returned.
+  -- | Shift the  cursor by  a 'RelativeIndex'.  Negative numbers indicate  motion in  the direction
+  -- 'Before' the cursor, positive numbers indicate motion  in the direction 'After' the cursor. The
+  -- number of  characters shifted is  returned. If the  cursor is  at the start  of the line  and a
+  -- negative 'RelativeIndex'  is given 'Nothing' is  returned. If the cursor  is at the end  of the
+  -- line and a positive 'RelativeIndex' is given 'Nothing' is returned.
   shiftCursor :: Monad (editor tags) => RelativeIndex -> editor tags RelativeIndex
   shiftCursor = liftEditLine . shiftCursor
 
@@ -898,20 +902,20 @@ defaultEditLineLiftResult = \ case
 
 ----------------------------------------------------------------------------------------------------
 
--- | This is a function type for editing a single line of text with a unboxed mutable 'MVector' as
--- the character buffer. You can quickly insert characters in @O(1)@ time, and you can move the
--- cursor in @O(n)@ time where @n@ is the size of the cursor motion. This monad behaves something
+-- | This is a function  type for editing a single line of text with  a unboxed mutable 'MVector' as
+-- the character  buffer. You can  quickly insert characters  in @O(1)@ time,  and you can  move the
+-- cursor in @O(n)@  time where @n@ is the  size of the cursor motion. This  monad behaves something
 -- like an interruptable parsing monad (something like 'StringParser', or the attoparsec Parser). An
 -- 'EditLine' function can pause itself on certain events, and be resumed.
 --
--- One event that causes a pause to occur is when a line breaking character is inserted. When this
+-- One event that causes a  pause to occur is when a line breaking  character is inserted. When this
 -- happens, inspect the 'EditLineResult', it may be waiting for the 'TextLine' it constructed on the
--- line break event to be consumed outside of the 'EditLine' evaluation context before
--- resuming. Typically you would push the 'TextLine' into another data structure, like a
+-- line  break  event   to  be  consumed  outside  of  the   'EditLine'  evaluation  context  before
+-- resuming.  Typically  you  would  push  the  'TextLine'  into  another  data  structure,  like  a
 -- 'VecEdit.Text.Editor.TextBuffer' that represents a larger string.
 --
 -- Another event that causes a pause to occur is when a line breaking character at the end of a line
--- is deleted. When this happens, the editor may need to be filled with a line that comes after the
+-- is deleted. When this happens, the editor may need  to be filled with a line that comes after the
 -- current line.
 newtype EditLine tags a
   = EditLine
@@ -932,7 +936,12 @@ data EditLineState tags
     , theEditLineTokenizer :: !(TokenizerTable LineBreakSymbol LineBreakerState)
     }
 
--- | This data type is used to control progress of the the 'EditLine' monad. It is almost a free
+-- | Synonym for 'EditLineState'. This name is more  descriptive for what the data type actually is:
+-- the  data structure  that contains  the mutable  buffer of  characters used  for line  editing by
+-- functions of the type 'EditLine'.
+type LineBuffer tags = EditLineState tags
+
+-- | This data  type is used to  control progress of the the  'EditLine' monad. It is  almost a free
 -- monad in that it defines continuation functions to be called when certain events occur, and these
 -- continuations are expected to be evaluated in some context external to the 'EditLine' monad.
 data EditLineResult (editor :: * -> * -> *) tags a
@@ -1175,8 +1184,8 @@ instance LineEditor EditLine where
       LT -> loop negate Before After 0
       GT -> loop id After Before 0
     where
-    -- Ordinarily it might be faster to use the shiftCursor function from the GapBuffer module, but
-    -- since we need to keep track of the number of non-ASCII characters, it is no more
+    -- Ordinarily it might be faster to use  the shiftCursor function from the GapBuffer module, but
+    -- since  we  need  to keep  track  of  the  number  of  non-ASCII  characters, it  is  no  more
     -- computationally difficult to pull, inspect, and push each character one at a time.
     stop = abs r
     loop neg dir other count =
@@ -1195,14 +1204,14 @@ instance LineEditor EditLine where
 
 ----------------------------------------------------------------------------------------------------
 
--- | Access the internals of the 'EditLineState'. The 'EditLine' function type does not instantiate
+-- | Access the internals of the 'EditLineState'.  The 'EditLine' function type does not instantiate
 -- the 'MonadState' typeclass because the state internal to the 'EditLine' function context contains
 -- values such as 'editLineBreakSymbol' that can be set by code using this function type, but cannot
--- be set to an arbitrary value ('NoLineBreak' is disallowed). Instantiating the 'MonadState'
+-- be  set to  an  arbitrary value  ('NoLineBreak' is  disallowed).  Instantiating the  'MonadState'
 -- typeclass would allow methods such as 'modify' or 'put' to set arbitrary values.
 --
--- In order to allow more limited access to the internal state of the 'EditLine' function context,
--- this gate-keeping function is exposed as part of the API. Currently this function is only useful
+-- In order to allow  more limited access to the internal state of  the 'EditLine' function context,
+-- this gate-keeping function is exposed as part of  the API. Currently this function is only useful
 -- with the 'editLineTokenizer' and 'editLineBreakSymbol' 'Lens'-es, which allows you to retrieve or
 -- set the 'TokenizerTable' used for line break parsing.
 onEditLineState :: State (EditLineState tags) a -> EditLine tags a
@@ -1241,17 +1250,17 @@ editLineNonAscii = \ case
 editLineBreakSymbol :: Lens' (EditLineState tags) LineBreakSymbol
 editLineBreakSymbol = lens theEditLineBreakSymbol $ \ a b -> a{ theEditLineBreakSymbol = b }
 
--- | Change the 'TokenizerTable' used for parsing line breaks. This table will be used when
+-- |  Change the  'TokenizerTable'  used for  parsing  line breaks.  This table  will  be used  when
 -- evaluating 'streamFoldLines', 'hFoldLines', and 'byteStreamDecode'.
 editLineTokenizer :: Lens' (EditLineState tags) (TokenizerTable LineBreakSymbol LineBreakerState)
 editLineTokenizer = lens theEditLineTokenizer $ \ a b -> a{ theEditLineTokenizer = b }
 
--- | Initialize a new 'EditLineState'. You may initialize it with a 'TextLine', which may be
--- 'emptyTextLine' to fill the buffer.
+-- |  Initialize a  new 'EditLineState'.  You may  initialize  it with  a 'TextLine',  which may  be
+-- 'emptyTextLine' to fill the 'EditLine' buffer.
 --
--- You can also specify how to position the cursor with 'Either' a 'VectorIndex', specifying how
--- many positions from the 'Left' (beginning) of the buffer to place the cursor, or you can specify
--- that you want the cursor @'Right' 'Before'@ or @'Right' 'After'@ the characters
+-- You can  also specify how to  position the cursor  with 'Either' a 'VectorIndex',  specifying how
+-- many positions from the 'Left' (beginning) of the  buffer to place the cursor, or you can specify
+-- that   you  want   the   cursor  @'Right'   'Before'@  or   @'Right'   'After'@  the   characters
 -- inserted. (Appologies to people who prefer right-to-left written languages, or for those who feel
 -- that the right is the beginning of the buffer.)
 newEditLineState
@@ -1268,9 +1277,9 @@ newEditLineState initSize =
   , theEditLineTokenizer      = lineBreak_LF
   }
 
--- | Run a single iteration of an 'EditLine' function. Iteration halts in the event that a
--- 'pushLine' or 'popLine' is evaluated. Inspect the 'EditLineResult' to extract the continuation
--- function and decide which action to take for either event. Use 'streamEditor' instead if you
+-- |  Run a  single  iteration of  an  'EditLine' function.  Iteration  halts in  the  event that  a
+-- 'pushLine' or  'popLine' is evaluated. Inspect  the 'EditLineResult' to extract  the continuation
+-- function and  decide which action  to take  for either event.  Use 'streamEditor' instead  if you
 -- would like to automatically handle these events by pushing 'TextLine's onto a stack.
 runEditLine
   :: EditLine tags a
@@ -1278,7 +1287,7 @@ runEditLine
   -> IO (EditLineResult EditLine tags a, EditLineState tags)
 runEditLine (EditLine f) = runStateT f
 
--- | Evaluate an 'EditLine' function, but capture it's 'EditLineResult', even errors and halting
+-- | Evaluate  an 'EditLine' function,  but capture it's  'EditLineResult', even errors  and halting
 -- conditions, and return the captured 'EditLineResult'.
 catchEditLineResult :: EditLine tags a -> EditLine tags (EditLineResult EditLine tags a)
 catchEditLineResult (EditLine f) = EditLine $ EditLineOK <$> f
@@ -1289,7 +1298,7 @@ columnNumber =
   toIndex . GaplessIndex . subtract 1 <$>
   editLineLiftGB (use GapBuf.beforeCursor)
 
--- | Lift a 'GapBuffer' function into the 'EditLine' function
+-- | Lift a 'GapBuffer' function into an 'EditLine' function context.
 editLineLiftGB :: GapBuffer UMVec.MVector Char a -> EditLine tags a
 editLineLiftGB f = do
   (result, gapbuf) <- edlnState (use editLineGapBuffer) >>= liftIO . runGapBuffer f
@@ -1327,15 +1336,15 @@ textLineFromVector constr lbrk vec =
   , theTextLineBreak = lbrk
   }
 
--- | Evaluates 'cutLine' to construct a 'TextLine' and clear the current buffer. Then evaluates
--- 'pushLine' with the constructed 'TextLine'.
+-- | Evaluates 'cutLine'  to construct a 'TextLine'  and clear the current  'EditLine' buffer.  Then
+-- evaluates 'pushLine' with the constructed 'TextLine'.
 newline
   :: (Monad (editor tags), LineEditor editor)
   => RelativeDirection -> editor tags ()
 newline dir = cutLine dir >>= pushLine dir
 
--- | Like 'newline' but sets 'theTextLineBreak' of the resultant 'TextLine' to the given
--- 'LineBreakSymbol'. 'NoLineBreak' values are ignored, so if the given 'LineBreakSymbol' is
+-- |  Like  'newline'  but  sets  'theTextLineBreak'  of  the  resultant  'TextLine'  to  the  given
+-- 'LineBreakSymbol'.  'NoLineBreak'  values are  ignored,  so  if  the given  'LineBreakSymbol'  is
 -- 'NoLineBreak' this function behaves exactly the same as 'newline'.
 lineBreak
   :: (Monad (editor tags),  LineEditor editor)
@@ -1348,17 +1357,17 @@ lineBreak dir lbrk =
   cutLine dir >>=
   pushLine dir
 
--- | Calls 'pushChar' for each item in the given 'String'. This function is simply defined as
--- @'mapM_' ('pushChar' 'Before')@, it is only here becuase it is expected to be used often enough
+-- | Calls  'pushChar' for  each item  in the  given 'String'.  This function  is simply  defined as
+-- @'mapM_' ('pushChar' 'Before')@, it  is only here becuase it is expected to  be used often enough
 -- that having a separate function for this feature might be convenient. This function does not take
--- a 'RelativeDirection', in must push the given 'String' in the 'Before' direction to avoid
+-- a  'RelativeDirection', in  must push  the  given 'String'  in  the 'Before'  direction to  avoid
 -- computing the length of the string, and to avoid parsing line breaking characters.
 insertString :: (Monad (editor tags), LineEditor editor) => String -> editor tags ()
 insertString = mapM_ $ pushChar Before
 
--- | Insert any 'FoldableString' into the text buffer. Like 'pushChar' and 'insertString', the
+-- |  Insert any  'FoldableString' into  the text  buffer. Like  'pushChar' and  'insertString', the
 -- @'\\n'@ character evaluates 'newline'. This function does not take a 'RelativeDirection', in must
--- push the given @string@ in the 'Before' direction to avoid computing the length of the string,
+-- push the given  @string@ in the 'Before' direction  to avoid computing the length  of the string,
 -- and to avoid parsing line breaking characters.
 insert
   :: (FoldableString string, Monad (editor tags), LineEditor editor)
@@ -1373,13 +1382,13 @@ joinLine
   => RelativeDirection -> editor tags ()
 joinLine dir = popLine dir >>= insertLineAtEnd dir
 
--- | Copy the buffer content and clear it. This is a convenience function that calls 'copyBuffer'
--- followed by 'clearBuffer', and returns the result from 'copyBuffer' while also setting the line
+-- | Copy the  buffer content and clear it.  This is a convenience function  that calls 'copyBuffer'
+-- followed by 'clearBuffer', and  returns the result from 'copyBuffer' while  also setting the line
 -- break symbol of the 'TextLine'. Neither the 'lineBreak' function (nor the 'newline' function) are
--- evaluated at all, so evaluating this function as part of a 'TextEdit' computation pushes no
+-- evaluated at  all, so  evaluating this  function as part  of a  'TextEdit' computation  pushes no
 -- information to the text buffer.
 --
--- You may set any 'LineBreakSymbol' at all, including 'NoLineBreak', since this function has no
+-- You may  set any 'LineBreakSymbol'  at all, including 'NoLineBreak',  since this function  has no
 -- effect on anything outside of the 'LineEditor' context.
 copyBufferClear
   :: (Monad (editor tags), LineEditor editor)
@@ -1389,14 +1398,14 @@ copyBufferClear lbrk =
   (textLineBreakSymbol .~ lbrk) <$>
   (copyBuffer <* clearBuffer)
 
--- | This function is the easiest way to evaluate an 'EditLine' function without the backing of a
--- 'TextBuffer' to keep lines pushed or poped by 'pushLine' or 'popLine'. It uses a stack to keep
--- lines pushed by 'pushLine' in both the 'Before' and 'After' directions, throwing an exception if
--- 'popLine' is evaluated on an empty stack (a 'GapBufferError' is thrown, though there is no
--- 'GapBuffer' involved). If the initial 'EditLine' function given is evaluates a function such as
+-- | This function  is the easiest way to  evaluate an 'EditLine' function without the  backing of a
+-- 'TextBuffer' to keep  lines pushed or poped by  'pushLine' or 'popLine'. It uses a  stack to keep
+-- lines pushed by 'pushLine' in both the  'Before' and 'After' directions, throwing an exception if
+-- 'popLine'  is evaluated  on an  empty stack  (a 'GapBufferError'  is thrown,  though there  is no
+-- 'GapBuffer' involved). If the  initial 'EditLine' function given is evaluates  a function such as
 -- 'hFoldLines', this function behaves somewhat similar to the UNIX @sed@ program.
 --
--- You may also use this function to evaluate a function of type 'ReadLines'.
+-- You may also use this function to evaluate a function of type 'EditStream'.
 streamEditor
   :: EditLine tags a
   -> EditLineState tags
@@ -1476,14 +1485,14 @@ newEditorStream st = EditorStream <$> newIORef (currentCursor .~ 0 $ st)
 streamByteString :: ByteString -> IO (IORef ByteString)
 streamByteString = newIORef
 
--- | Construct an 'IORef' containing a lazy 'ByteStream', so that the 'IORef' can be used as an
+-- | Construct  an 'IORef' containing  a lazy 'ByteStream',  so that the 'IORef'  can be used  as an
 -- argument to 'streamFoldLines'.
 streamLazyByteString :: LazyBytes.ByteString -> IO (IORef LazyBytes.ByteString)
 streamLazyByteString = newIORef
 
 ----------------------------------------------------------------------------------------------------
 
--- | This is the state for a UTF-8 decoder function. You feed bytes in, it produces chars or error
+-- | This is the state  for a UTF-8 decoder function. You feed bytes in,  it produces chars or error
 -- states.
 data UTF8Decoder
   = UTF8Decoder
@@ -1505,8 +1514,8 @@ type UTF8DecodeTakeChar a = Char -> State UTF8Decoder a
 --
 --  1. the number of bytes decoded thus far
 --
---  2. the bytes themselves, merged together into a 'Word32' with earlier bytes in
---     higher-significant positions. Use 'utf8ErrorDecompose' to break this value up into the
+--  2. the   bytes   themselves,  merged   together  into   a  'Word32'   with   earlier   bytes  in
+--     higher-significant  positions. Use  'utf8ErrorDecompose'  to  break this  value  up into  the
 --     sequence of bytes that caused the error.
 --
 type UTF8DecodeTakeError a = State UTF8Decoder a
@@ -1540,8 +1549,8 @@ utf8ByteCounter = lens theUTF8ByteCounter $ \ a b -> a{ theUTF8ByteCounter = b }
 utf8CharCounter :: Lens' UTF8Decoder Int
 utf8CharCounter = lens theUTF8CharCounter $ \ a b -> a{ theUTF8CharCounter = b }
 
--- | This function constructs a 'UTF8DecodeTakeError' function that calls the given contination
--- anywhere from 1 to 4 times, each time giving it a 'Char8' from the invalid UTF-8 character found
+-- | This  function constructs  a 'UTF8DecodeTakeError'  function that  calls the  given contination
+-- anywhere from 1 to 4 times, each time giving  it a 'Char8' from the invalid UTF-8 character found
 -- in the stream.
 utf8ErrorDecompose :: (fold -> Char8 -> State UTF8Decoder fold) -> fold -> UTF8DecodeTakeError fold
 utf8ErrorDecompose f fold = do
@@ -1553,9 +1562,9 @@ utf8ErrorDecompose f fold = do
         (loop $! count - 1)
   loop count fold
 
--- | This function steps the 'UTF8Decoder' state with a single byte. Evaluating 'runState' yields a
--- pure function, so it can be run anywhere with little overhead. This function is used by
--- 'streamFoldLines' and 'hFoldLines', which in turn passes it as the byte handling continuation in
+-- | This function steps the 'UTF8Decoder' state  with a single byte. Evaluating 'runState' yields a
+-- pure  function, so  it  can be  run  anywhere with  little  overhead. This  function  is used  by
+-- 'streamFoldLines' and 'hFoldLines', which in turn passes  it as the byte handling continuation in
 -- the 'byteStreamDecode' function.
 utf8DecoderPushByte
   :: Bool
@@ -1617,37 +1626,48 @@ utf8DecoderPushByte doStore step emit0 fail0 w =
 
 ----------------------------------------------------------------------------------------------------
 
--- | This function type is used for reading through 'IOByteStream's and building 'GapBuffer's full
--- of 'TextLine's. It instantiates 'MonadCont' and most of the looping APIs in this module pass a
--- halting function of type 'HaltReadLines' to their continuation so that the continuation can
--- implement logic that decides when to halt the read loop early.
+-- |  This function  type is  used almost  exclusively with  the 'hFoldLines'  and 'streamFoldLines'
+-- functions, which are functions  for performing some transformation (a fold) on  the content of an
+-- 'IOByteStream'. These functions will read through an  'IOByteStream' until a line break symbol is
+-- found. Upon finding  a line break, a  continuation (or "callback") of  this 'EditStream' function
+-- type is evaluated,  allowing the 'EditLineState' (which contains the  mutable 'LineBuffer') to be
+-- modified,  and 'TextLine's  to be  generated. When  evaluating 'hFoldLines'  or 'streamFoldLines'
+-- within  an 'VecEdito.Text.Editor.EditText'  function context,  modifications  can be  made to  an
+-- 'IOByteStream' as it is buffered into a 'VecEdito.Text.Editor.TextBuffer'.
 --
--- Functions of this type are used as continuations by stream reader functions such as 'hFoldLines'
--- or 'streamFoldLines'. These stream reader functions loop until the 'checkForEnd' condition is
--- met, and pass each line of characters read from the stream to a continuation function of this
--- type.
-newtype ReadLines fold tags a
-  = ReadLines
-    { unwrapReadLines ::
+-- This 'EditStream' function type instantiates 'LineEditor' and so can edit lines of text using the
+-- same APIs as the 'EditLine' function type. But it also instantiates 'MonadCont', which means that
+-- functions such  as 'hFoldLines' and 'streamFoldLines',  both of which take  continuations of type
+-- 'EditStream',  also pass  a halting  function of  type 'HaltEditStream'  to these  continuations,
+-- allowing the fold loop to be halted if some condition is met.
+--
+-- Those familiar with the UNIX/Linux operating system may know about the @sed@ utility program used
+-- in the CLI, and that the name @sed@ is a contraction of "__S__tream __ED__itor." And indeed, this
+-- 'EditStream'  function  type  has similar  functionality,  though  you  may  edit with  the  full
+-- 'EditLine' API  rather than  merely using  regular expressions  with capture  groups to  find and
+-- replace text patterns.
+newtype EditStream fold tags a
+  = EditStream
+    { unwrapEditStream ::
         ContT
-        (EditLineResult (ReadLines fold) tags (), ReadLinesState tags fold)
-        (StateT (ReadLinesState tags fold) IO)
-        (EditLineResult (ReadLines fold) tags a)
+        (EditLineResult (EditStream fold) tags (), EditStreamState tags fold)
+        (StateT (EditStreamState tags fold) IO)
+        (EditLineResult (EditStream fold) tags a)
     }
 
-instance MonadCont (ReadLines fold tags) where
+instance MonadCont (EditStream fold tags) where
   callCC f =
-    ReadLines $
+    EditStream $
     callCC $ \ halt ->
-    unwrapReadLines $ f $
-    ReadLines <$> (halt . EditLineOK)
+    unwrapEditStream $ f $
+    EditStream <$> (halt . EditLineOK)
 
--- | Functions of this type are constructed by stream reader functions such as 'hFoldLines' or
--- 'streamFoldLines' evaluating 'callCC' prior to entering the stream reading loop, and are passed
--- to the loop continuation functions of type 'ReadLines' so that these continuation functions may
--- evaluate the 'HaltReadLines' function to halt the stream reading loop.
+-- | Functions  of this  type are  constructed by stream  reader functions  such as  'hFoldLines' or
+-- 'streamFoldLines' evaluating 'callCC'  prior to entering the stream reading  loop, and are passed
+-- to the loop continuation functions of type  'EditStream' so that these continuation functions may
+-- evaluate the 'HaltEditStream' function to halt the stream reading loop.
 --
--- This function "returns" a 'Void' data type so when you use it, you may need to use the 'vacious'
+-- This function "returns" a 'Void' data type so when  you use it, you may need to use the 'vacious'
 -- function like so:
 --
 -- @
@@ -1657,71 +1677,71 @@ instance MonadCont (ReadLines fold tags) where
 --       ...
 --  )
 -- @
-type HaltReadLines fold tags = fold -> ReadLines fold tags Void
+type HaltEditStream fold tags = fold -> EditStream fold tags Void
 
--- | This is the stateful context of the 'ReadLines' function type.
+-- | This is the stateful context of the 'EditStream' function type.
 --
--- __Note:__ the @tags@ and @fold@ variables are reversed from the 'ReadLines' monad. This makes it
--- easier to instantiate 'ReadLinesState' into the 'Functor' typeclass and 'ReadLines' into
+-- __Note:__ the @tags@ and @fold@ variables are reversed from the 'EditStream' monad. This makes it
+-- easier  to instantiate  'EditStreamState'  into  the 'Functor'  typeclass  and 'EditStream'  into
 -- 'LineEditor' typeclass.
-data ReadLinesState tags fold
-  = ReadLinesState
-    { theReadLinesState       :: !fold
-    , theReadLinesUTF8Decoder :: !UTF8Decoder
-    , theReadLinesLineEditor  :: !(EditLineState tags)
-    , theReadLinesHandleUTFDecoderError :: !(HandleUTFDecodeError fold tags)
+data EditStreamState tags fold
+  = EditStreamState
+    { theEditStreamState       :: !fold
+    , theEditStreamUTF8Decoder :: !UTF8Decoder
+    , theEditStreamLineEditor  :: !(EditLineState tags)
+    , theEditStreamHandleUTFDecoderError :: !(HandleUTFDecodeError fold tags)
     }
 
--- | This is the type of function used by 'byteStreamDecode' to respond to UTF decoding
+-- |  This  is  the  type  of  function  used by  'byteStreamDecode'  to  respond  to  UTF  decoding
 -- errors. Passing 'Nothing' tells the decoder to silently drop the bad bytes.
 type HandleUTFDecodeError fold tags =
-  Maybe (HaltReadLines fold tags -> UTF8Decoder -> ReadLines fold tags ())
+  Maybe (HaltEditStream fold tags -> UTF8Decoder -> EditStream fold tags ())
 
-instance Functor (ReadLines fold tags) where
-  fmap f (ReadLines ma) = ReadLines $ fmap f <$> ma
+instance Functor (EditStream fold tags) where
+  fmap f (EditStream ma) = EditStream $ fmap f <$> ma
 
-instance Applicative (ReadLines fold tags) where
+instance Applicative (EditStream fold tags) where
   pure = return
   (<*>) = ap
 
-instance Monad (ReadLines fold tags) where
-  return = ReadLines . return . EditLineOK
-  (ReadLines f) >>= ma =
-    ReadLines $
+instance Monad (EditStream fold tags) where
+  return = EditStream . return . EditLineOK
+  (EditStream f) >>= ma =
+    EditStream $
     f >>= \ case
-      EditLineOK a -> unwrapReadLines $ ma a
+      EditLineOK a -> unwrapEditStream $ ma a
       EditLineFail err -> pure $ EditLineFail err
       EditLinePush dir line next -> pure $
         EditLinePush dir line $ next >>= ma
       EditLinePop  dir      next -> pure $
         EditLinePop  dir      $ next >=> ma
 
-instance MonadIO (ReadLines fold tags) where
-  liftIO = ReadLines . liftIO . fmap EditLineOK
+instance MonadIO (EditStream fold tags) where
+  liftIO = EditStream . liftIO . fmap EditLineOK
 
-instance MonadState fold (ReadLines fold tags) where
+instance MonadState fold (EditStream fold tags) where
   state f =
-    ReadLines $ lift $ state $ \ st ->
-    let (a, fold) = f (theReadLinesState st) in
-    (EditLineOK a, st{ theReadLinesState = fold })
+    EditStream $ lift $ state $ \ st ->
+    let (a, fold) = f (theEditStreamState st) in
+    (EditLineOK a, st{ theEditStreamState = fold })
 
-instance MonadError EditTextError (ReadLines fold tags) where
-  throwError = ReadLines . pure . EditLineFail
-  catchError (ReadLines try) catch =
-    ReadLines $
+instance MonadError EditTextError (EditStream fold tags) where
+  throwError = EditStream . pure . EditLineFail
+  catchError (EditStream try) catch =
+    EditStream $
     try >>= \ case
-      EditLineFail err -> unwrapReadLines $ catch err
+      EditLineFail err -> unwrapEditStream $ catch err
       result -> pure result
 
-instance MonadFail (ReadLines fold tags) where
+instance MonadFail (EditStream fold tags) where
   fail = throwError . EditTextFailed . Strict.pack
 
-instance LineEditor (ReadLines fold) where
-  editLineLiftResult = ReadLines . pure
+instance LineEditor (EditStream fold) where
+  editLineLiftResult = EditStream . pure
   liftEditLine f =
-    onReadLinesState get >>= \ readst ->
-    liftIO (runEditLine f $ readst ^. readLinesLineEditor) >>= \ (result, edst) ->
-    onReadLinesState (readLinesLineEditor .= edst) >>
+    onEditStreamState get >>= \ readst ->
+    liftIO (runEditLine f $ readst ^. editStreamLineEditor) >>= \ (result, edst) ->
+    onEditStreamState (editStreamLineEditor .= edst) >>
     case result of
       EditLineOK a -> pure a
       EditLineFail err -> throwError err
@@ -1734,121 +1754,123 @@ instance LineEditor (ReadLines fold) where
         EditLinePop dir $
         liftEditLine . next
 
--- | The value over which the 'ReadLines' function type is folding. Use this lens to view or update
--- the @fold@ value within a 'ReadLinesState' value.
-readLinesState :: Lens' (ReadLinesState tags fold) fold
-readLinesState = lens theReadLinesState $ \ a b -> a{ theReadLinesState = b }
+-- | The value over which the 'EditStream' function type is folding. Use this lens to view or update
+-- the @fold@ value within a 'EditStreamState' value.
+editStreamState :: Lens' (EditStreamState tags fold) fold
+editStreamState = lens theEditStreamState $ \ a b -> a{ theEditStreamState = b }
 
 -- | The 'UTF8Decoder' state.
-readLinesUTF8Decoder :: Lens' (ReadLinesState tags fold) UTF8Decoder
-readLinesUTF8Decoder = lens theReadLinesUTF8Decoder $ \ a b -> a{ theReadLinesUTF8Decoder = b }
+editStreamUTF8Decoder :: Lens' (EditStreamState tags fold) UTF8Decoder
+editStreamUTF8Decoder = lens theEditStreamUTF8Decoder $ \ a b -> a{ theEditStreamUTF8Decoder = b }
 
--- | The 'EditLineState' used to lift 'EditLine' functions into 'ReadLines' functions.
-readLinesLineEditor :: Lens' (ReadLinesState tags fold) (EditLineState tags)
-readLinesLineEditor = lens theReadLinesLineEditor $ \ a b -> a{ theReadLinesLineEditor = b }
+-- | The 'EditLineState' used to lift 'EditLine' functions into 'EditStream' functions.
+editStreamLineEditor :: Lens' (EditStreamState tags fold) (EditLineState tags)
+editStreamLineEditor = lens theEditStreamLineEditor $ \ a b -> a{ theEditStreamLineEditor = b }
 
-readLinesHandleUTFDecoderError :: Lens' (ReadLinesState tags fold) (HandleUTFDecodeError fold tags)
-readLinesHandleUTFDecoderError =
-  lens theReadLinesHandleUTFDecoderError $ \ a b ->
-  a{ theReadLinesHandleUTFDecoderError = b }
+editStreamHandleUTFDecoderError :: Lens' (EditStreamState tags fold) (HandleUTFDecodeError fold tags)
+editStreamHandleUTFDecoderError =
+  lens theEditStreamHandleUTFDecoderError $ \ a b ->
+  a{ theEditStreamHandleUTFDecoderError = b }
 
 -- | Default buffer size for the 'hFoldLines' function.
-hReadLineBufferSize :: Int
-hReadLineBufferSize = 65536
+hEditStreamBufferSize :: Int
+hEditStreamBufferSize = 65536
 
--- | Initialize a new 'ReadLinesState' so that you can evalaute functions such as 'streamFoldLines'
--- or 'hFoldLines'. The 'ReadLinesState' contains a 'UTF8Decoder' which might be in an inconsistent
--- state when 'streamFoldLines' ends, since a 'ReadLines' function may terminate execution before
--- reaching the end of a stream, and while in the middle of decoding a UTF-8 character. It is best
--- to keep the 'ReadLineState' value returned by 'streamFoldLines' or 'hFoldLines' for evaluation on
--- the remainder of the stream, should the 'ReadLines' function terminate under such circumstances.
-newReadLinesState :: fold -> EditLine tags (ReadLinesState tags fold)
-newReadLinesState fold =
+-- | Initialize a new 'EditStreamState' so that you can evalaute functions such as 'streamFoldLines'
+-- or 'hFoldLines'. The 'EditStreamState' contains a 'UTF8Decoder' which might be in an inconsistent
+-- state when 'streamFoldLines'  ends, since a 'EditStream' function may  terminate execution before
+-- reaching the end of a  stream, and while in the middle of decoding a  UTF-8 character. It is best
+-- to keep the 'EditStreamState' value returned  by 'streamFoldLines' or 'hFoldLines' for evaluation
+-- on  the  remainder  of  the  stream,  should  the  'EditStream'  function  terminate  under  such
+-- circumstances.
+newEditStreamState :: fold -> EditLine tags (EditStreamState tags fold)
+newEditStreamState fold =
   onEditLineState get >>= \ edst ->
   pure $
-  ReadLinesState
-  { theReadLinesState       = fold
-  , theReadLinesLineEditor  = edst
-  , theReadLinesUTF8Decoder = utf8Decoder
-  , theReadLinesHandleUTFDecoderError = Nothing
+  EditStreamState
+  { theEditStreamState       = fold
+  , theEditStreamLineEditor  = edst
+  , theEditStreamUTF8Decoder = utf8Decoder
+  , theEditStreamHandleUTFDecoderError = Nothing
   }
 
-onReadLinesState :: State (ReadLinesState tags fold) a -> ReadLines fold tags a
-onReadLinesState = ReadLines . lift . state . runState . fmap EditLineOK
+onEditStreamState :: State (EditStreamState tags fold) a -> EditStream fold tags a
+onEditStreamState = EditStream . lift . state . runState . fmap EditLineOK
 
--- | Not for export, it is impossible to call this without a 'ReadLinesState', and it is impossible
--- to construct a 'ReadLinesState' outside of the 'EditLine' monad. This function simply evaluates a
--- 'ReadLines' function in the IO monad.
-runReadLinesIO
-  :: ReadLines fold tags a
-  -> ReadLinesState tags fold
-  -> IO (EditLineResult (ReadLines fold) tags (), ReadLinesState tags fold)
-runReadLinesIO (ReadLines f) readst =
+-- | Not for export, it is impossible to call this without a 'EditStreamState', and it is impossible
+-- to construct a 'EditStreamState' outside of  the 'EditLine' monad. This function simply evaluates
+-- a 'EditStream' function in the IO monad.
+runEditStreamIO
+  :: EditStream fold tags a
+  -> EditStreamState tags fold
+  -> IO (EditLineResult (EditStream fold) tags (), EditStreamState tags fold)
+runEditStreamIO (EditStream f) readst =
   flip runStateT readst $
   runContT ((,) <$> (fmap (const ()) <$> f) <*> lift get) pure >>= \ (result, readst) ->
   put readst >> pure result
 
--- | Evaluate a 'ReadLines' function within an 'EditLine' function context, reusing the line buffer
--- of the current 'EditLine' function context as the same buffer for the 'ReadLines' function. A
--- 'UTF8Decoder' is required here in the event that a prior call to 'runReadLinesWith' or
--- 'runReadLinesIO' consumed only a portion of the input stream and stopped in the middle of a UTF-8
--- encoded character -- a rare occurrence but still possible.
-runReadLines
-  :: ReadLines fold tags a
-  -> ReadLinesState tags fold
-  -> EditLine tags (Either EditTextError (), ReadLinesState tags fold)
-runReadLines f readst =
+-- |  Evaluate  a  'EditStream'  function  within   an  'EditLine'  function  context,  reusing  the
+-- 'LineBuffer' of the current  'EditLine' function context as the same  buffer for the 'EditStream'
+-- function.  This function  does  not perform  any  iteration or  folding  unless the  'EditStream'
+-- continuation  function given  itself performs  some iteration.   This function  is typically  not
+-- useful on it's own, use 'hFoldLines' or 'streamFoldLines' instead.
+runEditStream
+  :: EditStream fold tags a
+  -> EditStreamState tags fold
+  -> EditLine tags (Either EditTextError (), EditStreamState tags fold)
+runEditStream f readst =
   onEditLineState get >>= \ edst ->
-  liftIO (runReadLinesIO f $ readLinesLineEditor .~ edst $ readst) >>= \ (result, readst) ->
-  onEditLineState (put $ readst ^. readLinesLineEditor) >>
+  liftIO (runEditStreamIO f $ editStreamLineEditor .~ edst $ readst) >>= \ (result, readst) ->
+  onEditLineState (put $ readst ^. editStreamLineEditor) >>
   case result of
     EditLineOK a -> pure (Right a, readst)
     EditLineFail err -> pure (Left err, readst)
     EditLinePush dir line next ->
       editLineLiftResult $
       EditLinePush dir line $
-      runReadLines next readst
+      runEditStream next readst
     EditLinePop dir next ->
       editLineLiftResult $
       EditLinePop dir $ \ line ->
-      runReadLines (next line) readst
+      runEditStream (next line) readst
 
--- | This function reads a file 'Handle' similar to how 'hGetContents' works, but buffering all
--- characters into a 'TextLine' structure until a line breaking character is found. Once the line
--- break character is received, or the end of the file 'Handle' stream is reached, the given
--- continuation is evaluated which can then use the 'LineEditor' functions to edit the line
--- buffer. You can retrieve the whole line as a 'TextLine' using 'copyBuffer'.
+-- | This  function reads a  file 'Handle'  similar to how  'hGetContents' works, but  buffering all
+-- characters into a 'TextLine'  structure until a line breaking character is  found.  Once the line
+-- break  character is  received, or  the end  of the  file 'Handle'  stream is  reached, the  given
+-- continuation  is evaluated  which  can then  use  the  'LineEditor' functions  to  edit the  line
+-- buffer.  You  can  retrieve  the  whole  content  of  the  'LineBuffer'  as  a  'TextLine'  using
+-- 'copyBuffer'.
 --
--- The 'Handle' will be set to 'char8' encoding and will have buffering disabled since a buffer
+-- The 'Handle'  will be set  to 'char8' encoding  and will have  buffering disabled since  a buffer
 -- already exists. UTF-8 decoding errors are ignored and the raw bytes are pushed to the buffer.
 --
--- You can pass a special handler function of type 'HandleUTFDecodeError' for taking care of UTF
+-- You can  pass a special handler  function of type  'HandleUTFDecodeError' for taking care  of UTF
 -- decoder errors, or you can pass 'Nothing' to silently drop bad bytes.
 hFoldLines
   :: Handle
-  -> (HaltReadLines fold tags -> LineBreakSymbol -> ReadLines fold tags ())
-  -> ReadLinesState tags fold
-  -> EditLine tags (Either EditTextError (), ReadLinesState tags fold)
+  -> (HaltEditStream fold tags -> LineBreakSymbol -> EditStream fold tags ())
+  -> EditStreamState tags fold
+  -> EditLine tags (Either EditTextError (), EditStreamState tags fold)
 hFoldLines handle f fold = do
   liftIO $ hSetByteStreamMode handle
   streamFoldLines handle f fold
 
--- | This function is similar to 'hFoldLines', but is more general. Rather than taking a 'Handle',
--- it takes any 'IOByteStream' type (including 'Handle'). If the @handle@ type variable really is a
--- file 'Handle' from the "System.IO" module, use 'hFoldLines' instead, or at least ensure that
--- 'hSetByteStreamMode' is called on the @handle@ prior to evaluating this function, you you may
+-- | This function is  similar to 'hFoldLines', but is more general. Rather  than taking a 'Handle',
+-- it takes any 'IOByteStream' type (including 'Handle').  If the @handle@ type variable really is a
+-- file 'Handle'  from the  "System.IO" module, use  'hFoldLines' instead, or  at least  ensure that
+-- 'hSetByteStreamMode' is  called on the  @handle@ prior to evaluating  this function, you  you may
 -- introduce character encodings bugs. Sorry, this is just one of those bugs the Haskell type system
 -- cannot help you avoid.
 streamFoldLines
   :: IOByteStream handle
   => handle
-  -> (HaltReadLines fold tags -> LineBreakSymbol -> ReadLines fold tags ())
-  -> ReadLinesState tags fold
-  -> EditLine tags (Either EditTextError (), ReadLinesState tags fold)
+  -> (HaltEditStream fold tags -> LineBreakSymbol -> EditStream fold tags ())
+  -> EditStreamState tags fold
+  -> EditLine tags (Either EditTextError (), EditStreamState tags fold)
 streamFoldLines h f =
   byteStreamDecode h
   (\ halt lbrk -> f halt lbrk >> clearBuffer) >=> \ (result, readst) ->
-  onEditLineState (put $ theReadLinesLineEditor readst) >>
+  onEditLineState (put $ theEditStreamLineEditor readst) >>
   pure (result, readst)
 
 {-# INLINE streamFoldLines #-}
@@ -1862,27 +1884,28 @@ hSetByteStreamMode h = do
 
 ----------------------------------------------------------------------------------------------------
 
--- | A lighter-weight, more easily optimized version of 'ReadLines' for internal use only. The type
--- of the monad transformer seems complicated, but that is only because the type is very specific
+-- | A lighter-weight, more easily optimized version of 'EditStream' for internal use only. The type
+-- of the monad  transformer seems complicated, but that  is only because the type  is very specific
 -- for solving the a very particular problem.
 --
--- The goal is to make writing to a buffer happen fast within a 'StreamDecode' function, and then
--- when the buffer is terminated by a newline, evaluate a 'ReadLines' continuation on that buffer,
--- differring error checking until the continuation is ready to be evaluated. The 'StreamDecode'
--- function type can throw errors or stop on a line break with 'sdEndLine', this is done by using a
--- "halting" function produced by 'callCC', so program flow can jump directly to the error checking
--- code, rather than checking the error condition on every single character that is input.
+-- The goal is to  make writing to a 'LineBuffer' happen fast within  a 'StreamDecode' function, and
+-- then when the  'LineBuffer' is terminated by  a newline, evaluate a  'EditStream' continuation on
+-- that 'LineBuffer',  differring error checking  until the continuation  is ready to  be evaluated.
+-- The 'StreamDecode' function type can throw errors or  stop on a line break with 'sdEndLine', this
+-- is done by using a "halting" function produced  by 'callCC', so program flow can jump directly to
+-- the error checking code, rather than checking  the error condition on every single character that
+-- is input.
 -- 
 -- Refer to the documentation of the 'runStreamDecode' function for how this is accomplished.
 --
--- To this end, the 'StreamDecode' monad tranformer stack contains a reader with the "halting"
--- function produced by 'callCC' as the reader environment. The 'sdFinal' function can be used to
--- call this halting function taken from the environment. The reader wraps a state monad specifc to
--- the decoder, and this state monad wraps a vector 'Ved.Editor' for writing characters to a
--- buffer. There are no checks performed on values of type 'Either' or of type 'EditLineResult' in
--- any of these monads. Once a 'StreamDecode' monad completes execution, it returns a
--- 'StreamIteration' function that is then evaluated which performs all of the error checks, and
--- returns the next 'StreamDecoder' to be evaluated.
+-- To this  end, the  'StreamDecode' monad  tranformer stack  contains a  reader with  the "halting"
+-- function produced by  'callCC' as the reader  environment. The 'sdFinal' function can  be used to
+-- call this halting function taken from the environment.  The reader wraps a state monad specifc to
+-- the  decoder, and  this state  monad wraps  a  vector 'Ved.Editor'  for writing  characters to  a
+-- 'LineBuffer'.  There  are   no  checks  performed  on   values  of  type  'Either'   or  of  type
+-- 'EditLineResult' in  any of these  monads.  Once a  'StreamDecode' monad completes  execution, it
+-- returns a  'StreamIteration' function  that is  then evaluated  which performs  all of  the error
+-- checks, and returns the next 'StreamDecoder' to be evaluated.
 newtype StreamDecode fold tags a
   = StreamDecode
     ( ReaderT (HaltStreamDecode fold tags)
@@ -1901,7 +1924,7 @@ newtype StreamDecode fold tags a
 
 newtype StreamIteration fold tags
   = StreamIteration
-    ( ReadLines fold tags
+    ( EditStream fold tags
       ( StreamDecode fold tags (StreamIteration fold tags)
       , StreamDecodeState tags fold
       )
@@ -1916,37 +1939,37 @@ data StreamDecodeState tags fold
     { theSDTable :: !(TokenizerTable LineBreakSymbol LineBreakerState)
     , theSDUTF8Decoder :: !UTF8Decoder
     , theSDWCharCount :: !Int
-    , theSDHalt :: HaltReadLines fold tags
+    , theSDHalt :: HaltEditStream fold tags
     , theSDDecodeUTFErrorHandler :: HandleUTFDecodeError fold tags
     }
 
 newStreamDecodeState
   :: TokenizerTable LineBreakSymbol LineBreakerState
-  -> HaltReadLines fold tags
-  -> ReadLines fold tags (StreamDecodeState tags fold)
+  -> HaltEditStream fold tags
+  -> EditStream fold tags (StreamDecodeState tags fold)
 newStreamDecodeState table halt =
-  onReadLinesState $
+  onEditStreamState $
   StreamDecodeState table <$>
-  use readLinesUTF8Decoder <*>
+  use editStreamUTF8Decoder <*>
   pure 0 <*>
   pure (vacuous <$> halt) <*>
-  use readLinesHandleUTFDecoderError
+  use editStreamHandleUTFDecoderError
 
--- | This is the function that evaluates a 'StreamDecode' function quickly in between calls to a
--- 'ReadLines' continuation. The basic principle is that program control is braided between
--- 'StreamDecode' functions which evaluate quickly when writing to a buffer, and 'ReadLines'
--- functions which evaluate arbitrary caller-defined continuation functions and perform checking on
+-- | This  is the function that  evaluates a 'StreamDecode' function  quickly in between calls  to a
+-- 'EditStream'  continuation. The  basic  principle  is that  program  control  is braided  between
+-- 'StreamDecode'  functions which  evaluate  quickly when  writing to  a  buffer, and  'EditStream'
+-- functions which evaluate arbitrary caller-defined  continuation functions and perform checking on
 -- error conditions.
 --
--- A 'StreamDecoder' is evaluated with 'runStreamDecoder' within a 'ReadLines' function context. The
--- 'StreamIteration' function is a 'ReadLines' function that typically contains the continuation
--- given to 'streamFoldLines', but modified by the decoder to return yet another 'StreamDecoder'
--- function (lets call it "next"). This "next" function is the code that will resume the stream
--- decoding loop. So basically, when a 'runStreamDecoder' runs a 'StreamDecoder' function (lets call
--- it the "current" 'StreamDecoder' function), the current function returns a 'StreamIteration'
--- containing the 'ReadLines' continuation function from 'streamFoldLines' , 'runStreamDecoder'
--- evaluates this 'ReadLines' continuation function which produces the "next"
--- 'StreamDecoder'. Program flow is like a braid, alternating between 'ReadLines' (which is slow)
+-- A  'StreamDecoder'   is  evaluated  with   'runStreamDecoder'  within  a   'EditStream'  function
+-- context. The  'StreamIteration' function is a  'EditStream' function that typically  contains the
+-- continuation  given to  'streamFoldLines', but  modified  by the  decoder to  return yet  another
+-- 'StreamDecoder' function (lets call it "next"). This "next" function is the code that will resume
+-- the stream decoding loop. So basically, when a 'runStreamDecoder' runs a 'StreamDecoder' function
+-- (lets  call  it  the  "current"  'StreamDecoder'   function),  the  current  function  returns  a
+-- 'StreamIteration'  containing the  'EditStream'  continuation function  from 'streamFoldLines'  ,
+-- 'runStreamDecoder' evaluates  this 'EditStream' continuation  function which produces  the "next"
+-- 'StreamDecoder'. Program flow  is like a braid, alternating between  'EditStream' (which is slow)
 -- and 'StreamDecoder' (which is fast). I think functional programmers call this a "Moore Machine."
 --
 -- __Note that this function will loop infinitely,__ so it is necessary to evaluate 'callCC' and set
@@ -1954,13 +1977,13 @@ newStreamDecodeState table halt =
 runStreamDecode
   :: forall tags fold . StreamDecode fold tags (StreamIteration fold tags)
   -> StreamDecodeState tags fold
-  -> ReadLines fold tags
+  -> EditStream fold tags
      ( StreamDecode fold tags (StreamIteration fold tags)
      , StreamDecodeState tags fold
      )
 runStreamDecode (StreamDecode f) streamState = do
-  let vectorBufferLens = readLinesLineEditor . editLineGapBuffer . gapBufferEditorState
-  vectorBuffer <- onReadLinesState $ use vectorBufferLens
+  let vectorBufferLens = editStreamLineEditor . editLineGapBuffer . gapBufferEditorState
+  vectorBuffer <- onEditStreamState $ use vectorBufferLens
   ((result, streamState), vectorBuffer) <- liftIO $
     flip Ved.runEditor vectorBuffer $
     flip runStateT streamState $
@@ -1968,7 +1991,7 @@ runStreamDecode (StreamDecode f) streamState = do
     callCC $
     runReaderT (Right <$> f) .
     fmap (StreamDecode . ReaderT . const)
-  onReadLinesState $ vectorBufferLens .= vectorBuffer
+  onEditStreamState $ vectorBufferLens .= vectorBuffer
   updateState streamState
   case result of
     Left err -> throwError err
@@ -1978,8 +2001,8 @@ runStreamDecode (StreamDecode f) streamState = do
       runStreamDecode f streamState
   where
   updateState streamState =
-    onReadLinesState $
-    readLinesUTF8Decoder .=
+    onEditStreamState $
+    editStreamUTF8Decoder .=
     streamState ^. sdUTF8Decoder
 
 -- | Evaluate the 'StreamDecode' halting function, either due to an exception, or with a successful
@@ -1990,7 +2013,7 @@ sdHaltLine result = ask >>= \ halt -> vacuous $ halt result
 -- | Call 'sdHaltLine' with the content of a 'StreamIteration', i.e. the next steps you want the
 -- 'StreamDecode' to take.
 sdEndLine
-  :: ReadLines fold tags (StreamDecode fold tags (StreamIteration fold tags))
+  :: EditStream fold tags (StreamDecode fold tags (StreamIteration fold tags))
   -> StreamDecode fold tags void
 sdEndLine f = do
   -- Get the wide-char count from the 'StreamDecodeState'
@@ -2004,9 +2027,9 @@ sdEndLine f = do
     liftEditLine $ edlnState $ editLineNonAsciiBefore .= w
     flip (,) st <$> f
 
--- | Evaluate the 'ReadLines' halting function, passing one final 'ReadLines' action to perform.
+-- | Evaluate the 'EditStream' halting function, passing one final 'EditStream' action to perform.
 sdEndStream
-  :: (HaltReadLines fold tags -> ReadLines fold tags ())
+  :: (HaltEditStream fold tags -> EditStream fold tags ())
   -> StreamDecode fold tags (StreamIteration fold tags)
 sdEndStream final =
   (\ halt -> StreamIteration $ final halt >> get >>= vacuous . halt) <$> use sdHalt
@@ -2014,7 +2037,7 @@ sdEndStream final =
 sdTable :: Lens' (StreamDecodeState tags fold) (TokenizerTable LineBreakSymbol LineBreakerState)
 sdTable = lens theSDTable $ \ a b -> a{ theSDTable = b }
 
-sdHalt :: Lens' (StreamDecodeState tags fold) (HaltReadLines fold tags)
+sdHalt :: Lens' (StreamDecodeState tags fold) (HaltEditStream fold tags)
 sdHalt = lens theSDHalt $ \ a b -> a{ theSDHalt = b }
 
 sdWCharCount :: Lens' (StreamDecodeState tags fold) Int
@@ -2030,8 +2053,8 @@ sdDecodeUTFErrorHandler =
 sdLiftVed :: Ved.Editor UMVec.MVector Char a -> StreamDecode fold tags a
 sdLiftVed = StreamDecode . lift . lift . lift
 
--- | This function actually write a 'Char' to the 'StreamDecode' buffer. It is used as the
--- @emitHandler@ given to the 'sdPushChar8' function, unless we are pushing a known non-Unicode
+-- |  This function  actually  write a  'Char'  to the  'StreamDecode'  buffer. It  is  used as  the
+-- @emitHandler@ given  to the  'sdPushChar8' function,  unless we are  pushing a  known non-Unicode
 -- character.
 sdPushChar :: Char -> StreamDecode fold tags ()
 sdPushChar c = do
@@ -2043,8 +2066,8 @@ sdPushChar c = do
     currentCursor += 1
   unless (isAscii c) $ sdWCharCount += 1
 
--- | This function simply increments the character and byte counters of the 'UTF8DecoderState'. The
--- given 'Char' value is ignored. It is used as the @emitHandler@ given to the 'sdPushChar8'
+-- | This function simply increments the character  and byte counters of the 'UTF8DecoderState'. The
+-- given  'Char' value  is ignored.  It is  used  as the  @emitHandler@ given  to the  'sdPushChar8'
 -- function when we are pushing a known non-Unicode character.
 sdPushBreak :: Char -> StreamDecode fold tags ()
 sdPushBreak _ =
@@ -2079,30 +2102,30 @@ sdPushChar8 emitHandler continue c8 = do
   next
 
 -- | This is the most general line breaking function. It takes an arbitrary 'IOByteStream' (which is
--- usally a 'Handle'), and an arbitrary 'TokenizerTable' for doing the line splitting (which is
--- usually 'lineBreak_LF' on UNIX-like systems, and 'lineBreak_CRLF' on Windows systems). It could
--- also be set to 'lineBreak_NUL' or 'allLineBreaks' (to break on @'\FF'@ and @'\VT'@ characters as
+-- usally a  'Handle'), and  an arbitrary 'TokenizerTable'  for doing the  line splitting  (which is
+-- usually 'lineBreak_LF' on  UNIX-like systems, and 'lineBreak_CRLF' on Windows  systems). It could
+-- also be set to 'lineBreak_NUL' or 'allLineBreaks'  (to break on @'\FF'@ and @'\VT'@ characters as
 -- well), or any 'TokenizerTable' of your choosing. It also requires a continuation function of type
--- 'ReadLines' for pushing 'LineBreakSymbol's.
+-- 'EditStream' for pushing 'LineBreakSymbol's.
 byteStreamDecode
   :: forall handle fold tags
    . IOByteStream handle
   => handle
-  -> (HaltReadLines fold tags -> LineBreakSymbol -> ReadLines fold tags ())
-  -> ReadLinesState tags fold
-  -> EditLine tags (Either EditTextError (), ReadLinesState tags fold)
+  -> (HaltEditStream fold tags -> LineBreakSymbol -> EditStream fold tags ())
+  -> EditStreamState tags fold
+  -> EditLine tags (Either EditTextError (), EditStreamState tags fold)
 byteStreamDecode h pushBreak lineBuffer =
   edlnState (use editLineTokenizer) >>= \ table ->
-  flip runReadLines lineBuffer $
+  flip runEditStream lineBuffer $
   callCC $ newStreamDecodeState table >=>
   (>> get) . lineLoop charLoop
-  -- This loops through the bytes of an 'IOByteStream', buffering bytes, and then freezing the
-  -- buffer into a 'TextLine' when a line breaking character is found. When a line breaking
-  -- character is found, if it's value is '\LF' or '\CR', this might be followed by an accompanying
-  -- '\CR' or '\LF' (respectively). After a complete line break is parsed, a line is emitted by
-  -- evaluating the given consumer continuation 'f', and 'f' decides what to do with the content of
-  -- the 'GapBuffer'. The whole loop is lifted into the 'ReadLines' monad, and a halting function is
-  -- produced with 'callCC' which can be triggered by the 'f' continuation, or can be halted when
+  -- This loops  through the bytes  of an 'IOByteStream', buffering  bytes, and then  evaluating the
+  -- given 'EditStream' continuation function @f@ when a  line breaking character is found.  If it's
+  -- value  is  '\LF'  or  '\CR',  this  might  be  followed  by  an  accompanying  '\CR'  or  '\LF'
+  -- (respectively). After  a complete line  break is  parsed, a line  is emitted by  evaluating the
+  -- given  consumer  continuation  @f@, and  @f@  decides  what  to  do  with the  content  of  the
+  -- 'GapBuffer'. The whole  loop is lifted into  the 'EditStream' monad, and a  halting function is
+  -- produced with 'callCC'  which can be triggered by  the @f@ continuation, or can  be halted when
   -- the end-of-stream is reached.
   where
   cutLine
@@ -2118,7 +2141,7 @@ byteStreamDecode h pushBreak lineBuffer =
   lineLoop
     :: StreamDecode fold tags (StreamIteration fold tags)
     -> StreamDecodeState tags fold
-    -> ReadLines fold tags ()
+    -> EditStream fold tags ()
   lineLoop step = runStreamDecode step >=> uncurry lineLoop
 
   checkStreamEnd
@@ -2136,11 +2159,11 @@ byteStreamDecode h pushBreak lineBuffer =
 
   checkLineBreak :: Char8 -> StreamDecode fold tags (StreamIteration fold tags)
   checkLineBreak c8 =
-    --  We must update the UTF-8 decoder on every single byte in order to properly account for the
-    -- number of bytes decoded and characters emitted, and also to catch UTF-8 decoding errors at
+    --  We must update the  UTF-8 decoder on every single byte in order  to properly account for the
+    -- number of bytes  decoded and characters emitted,  and also to catch UTF-8  decoding errors at
     -- the end of lines.
     let byte pusher = sdPushChar8 pusher charLoop in
-    -- Check for a line break character using 'tokTableLookup'. If the byte from the stream is not
+    -- Check for a line  break character using 'tokTableLookup'. If the byte from  the stream is not
     -- line breaking, emit the byte to 'sdPushChar8'.
     (flip tokTableLookup $! fromChar8 c8) <$> use sdTable >>= \ (lbrk, st) ->
     case st of
@@ -2149,11 +2172,11 @@ byteStreamDecode h pushBreak lineBuffer =
       CharNotLineBreaking -> byte sdPushChar  c8 >> charLoop
 
   next lbrk =
-    -- Called by 'checkLineBreak' if it found a '\LF' or '\CR' character. If this function can pull
+    -- Called by 'checkLineBreak' if it found a '\LF'  or '\CR' character. If this function can pull
     -- one byte from the stream to check for an accompanying '\CR' or '\LF' character, then it emits
-    -- a 'TextLine' with the 2-character line break. If the byte pulled is not line breaking, a
-    -- 'TextLine' is emitted with just the 1-character line break, but then we immediately charLoop back
-    -- immediately to 'checkLineBreak' with the character just pulled.
+    -- a 'TextLine'  with the 2-character  line break. If  the byte pulled  is not line  breaking, a
+    -- 'TextLine' is emitted with just the 1-character  line break, but then we immediately charLoop
+    -- back immediately to 'checkLineBreak' with the character just pulled.
     checkStreamEnd lbrk $ \ c8 ->
     let c = fromChar8 c8 in
     case lbrk of
