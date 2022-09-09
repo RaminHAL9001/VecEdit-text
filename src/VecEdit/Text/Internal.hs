@@ -1491,13 +1491,16 @@ type UTF8DecodeStep a = State UTF8Decoder a
 -- | This function is evaluated when a 'Char' is successfully decoded.
 type UTF8DecodeTakeChar a = Char -> State UTF8Decoder a
 
--- | This function is evaluated when a bad character is found. It takes 2 arguments:
+-- | This  function is  evaluated when a  bad character is  found. Use  'Control.Monad.State.get' to
+-- obtain the  'UTF8Decoder' state, from that  you can obtain  information that might be  helpful to
+-- you, such as:
 --
---  1. the number of bytes decoded thus far
+--  * 'theUTF8ByteCounter' -- the number of bytes decoded thus far
 --
---  2. the   bytes   themselves,  merged   together  into   a  'Word32'   with   earlier   bytes  in
---     higher-significant  positions. Use  'utf8ErrorDecompose'  to  break this  value  up into  the
---     sequence of bytes that caused the error.
+--  * 'theUTF8ElemStore' -- the bytes themselves, merged together into a 'Word32' with earlier bytes
+--    in   higher-significant   positions,    and   the   number   of   bytes    stored   noted   by
+--    'theUTF8ElemCount'. Use 'utf8ErrorDecompose' to break this value up into the sequence of bytes
+--    that caused the error.
 --
 type UTF8DecodeTakeError a = State UTF8Decoder a
 
