@@ -23,6 +23,9 @@ library
     VecEdit.Text.String
     VecEdit.Text.TokenizerTable
 
+  other-modules:
+    VecEdit.Text.Internal
+
   default-extensions:
     DataKinds
     DeriveDataTypeable
