@@ -1,28 +1,7 @@
--- | this module provides type classes and instances  for a consistent interface for all the various
--- string types  that Haskell provides, and  APIs to convert  between string types easily.  There is
--- also a catch-all string type called 'StringData' which can assume any of the supported encodings:
---
---  - @String@ -- lists of characters
--- 
---  - Strict and lazy 'Strict.Text' -- a sequence 16-bit wide words encoding a string of UTF-16
---  - 'Char's.
--- 
---  - Strict and lazy 'Char 'CBytes.ByteString' -- a  sequence of 8-bit wide words encoding a string
---    of ASCII-only (no UTF) characters.
--- 
---  - Strict and lazy UTF-8 encoded 'UTF8String.ByteString'.
--- 
---  - Unboxed 'UVec.Vector's of 8-bit 'Char' values (ASCII-only, no UTF).
--- 
---  - Unboxed 'UVec.Vector's of 32-bit wide UTF 'Char' values (UTF-32 encoded strings).
---
--- Sorry,  but 'UVec.Vectors'  encoding 24-bit  wide UTF  'Char' values  are not  supported as  this
--- encoding not used very often.
---
--- There is also the 'IOByteStream' APIs for constructing strings from file 'Handle's as a stream of
--- bytes encoding  a string  of UTF-8 characters,  and the 'EditLine'  API for  constructing strings
+-- | There is also the 'IOByteStream' APIs for  constructing strings from file 'Handle's as a stream
+-- of bytes encoding a  string of UTF-8 characters, and the 'EditLine'  API for constructing strings
 -- using a 'GapBuffer'.
-module VecEdit.Text.String
+module VecEdit.Text.Internal
   ( -- ** String data types
     StringData(..), ByteVector(..), Char8, toChar8Lossy, fromChar8,
     CharVector, byteVectorSize,
@@ -73,7 +52,7 @@ import VecEdit.Types
     RelativeIndex, RelativeDirection(..), EditTextError(..), TextPrimOpError(PopItem),
   )
 
-import VecEdit.Text.LineBreak
+import VecEdit.Text.Line.Break
   ( LineBreakSymbol(..), LineBreakerState(..), lineBreakSize, lineBreak_LF
   )
 import VecEdit.Text.TokenizerTable (TokenizerTable, tokTableLookup)
@@ -1405,7 +1384,9 @@ copyBufferClear lbrk =
 -- 'GapBuffer' involved). If the  initial 'EditLine' function given is evaluates  a function such as
 -- 'hFoldLines', this function behaves somewhat similar to the UNIX @sed@ program.
 --
--- You may also use this function to evaluate a function of type 'EditStream'.
+-- __NOTE:__ it may seem as though this function belongs in the "VecEdit.Text.Stream" module, but it
+-- is  a  specific  implementation   of  the  'EditLine'  function,  and  so   is  defined  in  this
+-- "VecEdit.Text.Line.Editor" module instead.
 streamEditor
   :: EditLine tags a
   -> EditLineState tags

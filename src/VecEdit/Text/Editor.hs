@@ -26,8 +26,8 @@ import VecEdit.Types
     TextPrimOpError(..), EditTextError(..),
   )
 
-import VecEdit.Text.LineBreak (LineBreakSymbol(NoLineBreak))
-import VecEdit.Text.String
+import VecEdit.Text.Line.Break (LineBreakSymbol(NoLineBreak))
+import VecEdit.Text.Internal
   ( TextLine, textLineBreakSymbol,
     emptyTextLine, textLineNull, textLineContentLength,
     streamFoldLines, emptyTextLine,

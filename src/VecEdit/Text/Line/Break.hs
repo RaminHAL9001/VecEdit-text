@@ -1,4 +1,4 @@
-module VecEdit.Text.LineBreak
+module VecEdit.Text.Line.Break
   ( -- * Line Break Behavior
     --
     -- The line break behavior of the 'TextBuffer' can be programmed to behave differently from the

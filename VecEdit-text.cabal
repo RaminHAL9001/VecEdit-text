@@ -19,9 +19,13 @@ library
 
   exposed-modules:
     VecEdit.Text.Editor
-    VecEdit.Text.LineBreak
-    VecEdit.Text.String
+    VecEdit.Text.Line
+    VecEdit.Text.Line.Editor
+    VecEdit.Text.Line.Break
+    VecEdit.Text.Parser
+    VecEdit.Text.Stream
     VecEdit.Text.TokenizerTable
+    VecEdit.Text.UTF8
 
   other-modules:
     VecEdit.Text.Internal
@@ -57,6 +61,7 @@ library
     , bytestring
     , lens
     , mtl
+    , parsers
     , semigroups
     , text
     , transformers

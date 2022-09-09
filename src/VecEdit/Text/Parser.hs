@@ -26,7 +26,7 @@ import VecEdit.Types
          LineIndex(..), CharIndex, textPointRow, textPointColumn,
        )
 import VecEdit.Print.DisplayInfo (DisplayInfo(displayInfo), displayInfoShow)
-import VecEdit.Text.String
+import VecEdit.Text.Internal
        ( TextLine, textLineTags,
          StringLength(stringLength), CharStreamable(toCharStream),
          CharStream, getCharStream, getCharStreamCount, stepCharStream, charStreamAppend,
