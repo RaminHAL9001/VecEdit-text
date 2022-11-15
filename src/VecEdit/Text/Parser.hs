@@ -1,10 +1,12 @@
--- | 
+-- | This module defines a monadic parser 'StringParser' that operates on the 'TextLine' data
+-- type. This parser is designed to be used with a 'VecEdit.Text.Line.LineEdit' or
+-- 'VecEdit.Text.Editor.TextEdit' function context.
 module VecEdit.Text.Parser
   ( -- * String Parser
     StringParser(..), StringParserResult(..), currentTextPoint,
     runStringParser, feedStringParser, parserResultWaiting,
     StringParserState(..), stringParserState,
-    parserIndex, parserStream, parserIsEOF,
+    parserCharCount, parserStream, parserStreamSeq, parserIsEOF,
     parserCursor, parserRow, parserColumn,
     parserStartPoint, parserLabel,
 
@@ -22,14 +24,15 @@ module VecEdit.Text.Parser
   ) where
 
 import VecEdit.Types
-       ( TextPoint(..), TextRange(..), ToIndex(..), FromIndex(..), IndexValue(..),
+       ( TextPoint(..), TextRange(..), ToIndex(..), IndexValue(..),
          LineIndex(..), CharIndex, textPointRow, textPointColumn,
        )
 import VecEdit.Print.DisplayInfo (DisplayInfo(displayInfo), displayInfoShow)
 import VecEdit.Text.Internal
        ( TextLine, textLineTags,
          StringLength(stringLength), CharStreamable(toCharStream),
-         CharStream, getCharStream, getCharStreamCount, stepCharStream, charStreamAppend,
+         CharStream, getCharStream, charStreamEnd,
+         CharStreamSeq, putCharStreamSeq, takeCharStreamSeq, charStreamSeqNull,
        )
 import VecEdit.Text.Editor
        ( EditText, TextBuffer, getLineIndex, maxLineIndex,
@@ -54,9 +57,9 @@ import Text.Parser.Token (TokenParsing())
 
 ----------------------------------------------------------------------------------------------------
 
--- | An 'StringParser' is a kind of string parser that operates on 'CharStreamable' stringss. The
--- 'StringParserState' has an index value of type 'Int' that points to a position in the string
--- @str@. When the end of a string is reached the parsers enters into it's 'ParserWait' state. You
+-- | An 'StringParser'  is a kind of  string parser that operates on  'CharStreamable' stringss. The
+-- 'StringParserState' has  an index value  of type 'Int'  that points to  a position in  the string
+-- @str@. When the end  of a string is reached the parsers enters  into it's 'ParserWait' state. You
 -- can insert another @str@ of input, increment 'theParserLineIndex', and resume parsing.
 --
 -- The 'StringParser' instantiates the 'CharParsing' type class of the "parsers" package.
@@ -67,42 +70,50 @@ newtype StringParser m a
     }
   deriving Functor
 
--- | The state of an 'StringParser' keeps track of the current string @str@, and the index in the
--- current string that the parser is inspecting. There is also a counter keeping track of the total
--- number of characters inspected, and a counter keeping track of the total number of lines being
+-- | The state  of an 'StringParser' keeps track of  the current string @str@, and the  index in the
+-- current string that the parser is inspecting. There  is also a counter keeping track of the total
+-- number of characters  inspected, and a counter keeping  track of the total number  of lines being
 -- inspected.
 --
--- Initialize a new 'StringParserState' with 'stringParserState', and then evaluate
--- 'feedStringParser' on the state value for every line of input you receive. Lines needs not be
--- broken on line breaking characters, but 'parserIsEOF' should be set to 'True' on the final line
+-- Initialize   a   new   'StringParserState'    with   'stringParserState',   and   then   evaluate
+-- 'feedStringParser' on  the state value for  every line of input  you receive. Lines needs  not be
+-- broken on line breaking  characters, but 'parserIsEOF' should be set to 'True'  on the final line
 -- of input that is to be parsed.
 data StringParserState
   = StringParserState
     { theParserStream :: !CharStream
       -- ^ Keeps track of the current string being parsed.
+    , theParserStreamSeq :: !CharStreamSeq
+      -- ^ If more 'CharStream's are appended, they  are stored here in this FIFO. Parsing continues
+      -- until this FIFO is emptied, then the parser enters  a wait state where you can feed it more
+      -- input.
+    , theParserCharCount :: !Int
+      -- ^ Keeps track of the number of characters that have been parsed.
     , theParserIsEOF :: !Bool
-      -- ^ Indicates whether this parser is at the end of it's input. If this is set to 'True' and
+      -- ^ Indicates whether this parser  is at the end of it's input. If this  is set to 'True' and
       -- 'getCharStream' is returning 'Nothing' on 'theParserStream', then this parser is at the end
-      -- of the file.
+      -- of the file. , and also 'theParserStreamSeq' is empty according to 'charStreamSeqNull'.
     , theParserCursor :: !TextPoint
       -- ^ Keeps track of the total number of characters that have been parsed across all lines.
     , theParserStartPoint :: !TextPoint
-      -- ^ Keeps track of 'theParserIndex' and 'theParserLineIndex' of where the current label
-      -- ('theParserLabel') was set so that the range of characters for that label can be reported
+      -- ^  Keeps track  of 'theParserIndex'  and 'theParserLineIndex'  of where  the current  label
+      -- ('theParserLabel') was set so  that the range of characters for that  label can be reported
       -- if an parse error should occur.
     , theParserLabel :: !Strict.Text
       -- ^ Keeps track of the name of the parser for a time, used in error reporting.
     }
 
--- | Construct a new 'StringParserState' from a @str@ value. This starts 'parserStartPoint' on line
--- 0 so that you can initializae a fresh copy of this state value with 'feedStringParser' on the
--- first line of the input that you need to parse. The 'feedStringParser' function increments the
--- line number, so running 'feedStringParser' on a fresh 'stringParserState' increments the line
+-- | Construct a new 'StringParserState' from a  @str@ value. This starts 'parserStartPoint' on line
+-- 0 so  that you can initializae  a fresh copy of  this state value with  'feedStringParser' on the
+-- first line of  the input that you  need to parse. The 'feedStringParser'  function increments the
+-- line number,  so running 'feedStringParser'  on a  fresh 'stringParserState' increments  the line
 -- number frome line 0 to line 1.
 stringParserState :: StringParserState
 stringParserState =
   StringParserState
-  { theParserStream = mempty
+  { theParserStream = charStreamEnd
+  , theParserStreamSeq = mempty
+  , theParserCharCount = 0
   , theParserIsEOF = False
   , theParserCursor = line0
   , theParserStartPoint = line0
@@ -115,9 +126,9 @@ stringParserState =
     , theTextPointColumn = 0
     }
 
--- | Keeps track of the current index in the current 'parserStream'.
-parserIndex :: StringParserState -> Int
-parserIndex = getCharStreamCount . theParserStream
+-- | Keeps track of the number of characters that have been parsed.
+parserCharCount :: Lens' StringParserState Int
+parserCharCount = lens theParserCharCount $ \ a b -> a{ theParserCharCount = b }
 
 -- | Not for export
 getParserState :: Monad m => StringParser m StringParserState
@@ -131,9 +142,15 @@ putParserState = StringParser . fmap ParseOK . put
 parserStream :: Lens' StringParserState CharStream
 parserStream = lens theParserStream $ \ a b -> a{ theParserStream = b }
 
--- | Keeps track of whether the current line of input is the last line of input. However the
--- 'ParserState' is not truly at the end-of-file until 'getCharStream' evaluated on
--- 'theParserStream' is producing 'Nothing'.
+-- | If more 'CharStream's are appended, they are  stored here in this FIFO. Parsing continues until
+-- this FIFO is emptied, then the parser enters a wait state where you can feed it more input.
+parserStreamSeq :: Lens' StringParserState CharStreamSeq
+parserStreamSeq = lens theParserStreamSeq $ \ a b -> a{ theParserStreamSeq = b }
+
+-- | Keeps  track of  whether the current  line of  input is  the last line  of input.   However the
+-- 'ParserState'   is  not   truly   at   the  end-of-file   until   'getCharStream'  evaluated   on
+-- 'theParserStream' is  producing 'Nothing',  and also 'theParserStreamSeq'  is empty  according to
+-- 'charStreamSeqNull'.
 parserIsEOF :: Lens' StringParserState Bool
 parserIsEOF = lens theParserIsEOF $ \ a b -> a{ theParserIsEOF = b }
 
@@ -227,9 +244,10 @@ instance Show a => DisplayInfo (StringParserResult m a) where
 
 instance Show StringParserState where
   show st =
-    "(parser " <> show (theParserStream st) <>
+    "(parser " <> show (show $ theParserStream st) <>
     " :line " <> show (st ^. parserRow) <>
     " :column " <> show (st ^. parserColumn) <>
+    " :char-count " <> show (st ^. parserCharCount) <>
     " :start-point (" <>
     let pt = theParserStartPoint st in
     show (theTextPointRow pt) <> " " <>
@@ -240,11 +258,17 @@ instance Show StringParserState where
 instance DisplayInfo StringParserState where
   displayInfo putStr st = do
     putStr "(parser\n "
-    displayInfoShow putStr $ theParserStream st
+    displayInfoShow putStr $ show $ theParserStream st
     putStr "\n  :line "
     displayInfoShow putStr (st ^. parserRow)
+    putStr "\n  :is-eof "
+    displayInfoShow putStr (st ^. parserIsEOF)
+    putStr "\n  :more "
+    displayInfoShow putStr (not $ charStreamSeqNull $ st ^. parserStreamSeq)
     putStr "\n  :column "
     displayInfoShow putStr (st ^. parserColumn)
+    putStr "\n  :char-count "
+    displayInfoShow putStr (st ^. parserCharCount)
     let start = theParserStartPoint st
     putStr "\n  :start-point ("
     displayInfoShow putStr $ theTextPointRow start
@@ -270,7 +294,9 @@ feedStringParser st eof string =
   (parserRow +~ 1) .
   (parserColumn .~ 1) .
   (parserIsEOF .~ eof) .
-  (parserStream %~ flip charStreamAppend string) $
+  ( parserStreamSeq %~
+    putCharStreamSeq (toCharStream string charStreamEnd)
+  ) $
   st
 
 -- | Evaluates to 'True' if the given 'StringParserResult' is waiting for more input. When
@@ -327,36 +353,46 @@ instance Monad m => Parsing (StringParser m) where
 
   unexpected msg = throwError $ Strict.pack $ "unexpected " <> msg
 
-  eof = do
-    (stream, isEOF) <-
-      StringParser $
-      (\ st -> ParseOK ( theParserStream st , theParserIsEOF st)) <$>
-      get
-    case getCharStream stream of
-      Nothing | isEOF -> pure ()
-      _ -> empty
+  eof = StringParser $ do
+    st <- get
+    let isEOF  = st ^. parserIsEOF
+    let stream = st ^. parserStream
+    let count  = st ^. parserCharCount
+    let sequ   = st ^. parserStreamSeq
+    case getCharStream count stream of
+      Left count | isEOF && charStreamSeqNull sequ ->
+        ParseOK <$> (parserCharCount .= count)
+      _ ->
+        pure NoMatch
 
 instance Monad m => CharParsing (StringParser m) where
 
-    satisfy ok =
-      ( StringParser $
-        (\ st ->
-          ParseOK (theParserStream st, theParserIsEOF st)
-        ) <$> get
-      ) >>= \ (stream, isEOF) ->
-      case getCharStream stream of
-        Nothing -> 
-          if isEOF then empty else
-          StringParser $ pure $ ParseWait $ satisfy ok
-        Just  c ->
-          if ok c then
-            StringParser
-            ( ParseOK <$>
-              ( parserStream .= stepCharStream stream >>
-                parserColumn += 1
-              )
-            ) *> pure c
-          else empty
+    satisfy ok = StringParser $ do
+      st <- get
+      let isEOF  = st ^. parserIsEOF
+      let stream = st ^. parserStream
+      let count  = st ^. parserCharCount
+      case getCharStream count stream of
+        Left count ->
+          let sequ = st ^. parserStreamSeq in
+          case takeCharStreamSeq sequ of
+            (Just cs, sequ) -> do
+              parserStream .= cs
+              parserStreamSeq .= sequ
+              stringParserStateT $ satisfy ok
+            (Nothing, _) | not isEOF -> do
+              parserStream .= stream
+              parserCharCount .= count
+              pure (ParseWait $ satisfy ok)
+            _ -> pure NoMatch
+        Right (count, c, next) ->
+          if ok c then do
+            parserStream .= next
+            parserCharCount .= count
+            parserColumn += 1
+            pure $ ParseOK c
+          else
+            pure $ NoMatch
 
 instance Monad m => LookAheadParsing (StringParser m) where
 
@@ -490,7 +526,7 @@ runParserOnRange doRepeat fold range p0 =
     loop id p0
     (ParserState{ theParserStateFold = fold, theParserStateLine = line }) $
     stringParserState
-    { theParserStream = toCharStream (unwrapIndex $ fromIndex firstColumn) line
+    { theParserStream = toCharStream line charStreamEnd
     , theParserCursor = start
     , theParserStartPoint = start
     }
@@ -530,7 +566,10 @@ runParserOnRange doRepeat fold range p0 =
           getLineIndex nextRow >>= \ line ->
           loop stack (Parser $ lift p) fold $
           parst
-          { theParserStream = charStreamAppend (theParserStream parst) line
+          { theParserStreamSeq =
+              putCharStreamSeq
+              (toCharStream line charStreamEnd)
+              (theParserStreamSeq parst)
           , theParserIsEOF = nextRow >= lastRow
           , theParserCursor =
               TextPoint

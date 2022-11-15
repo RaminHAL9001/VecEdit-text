@@ -32,10 +32,13 @@ module VecEdit.Text.Line
     CharVector, byteVectorSize,
     -- ** Folding over strings
     FoldableString(..), StringLength(..),
-    CharStreamable(..), CharStream,
-    getCharStream, stepCharStream, getCharStreamCount, charStreamAppend,
+    CharStreamable(..), CharStream, getCharStream,
     indexFoldCharStream, foldCharStream, indexFoldStreamable, foldStreamable,
-    charStreamSetChar, charStreamSetEnd, charStreamUTF8Bytes, charStreamVector,
+    charStreamSetChar, charStreamEnd, charStreamUTF8Bytes, charStreamVector,
+    CharStreamBits, charStreamBitsNull,
+    -- *** Sequences of 'CharStream's
+    CharStreamSeq, charStreamSeqFromList, charStreamSeqNull,
+    putCharStreamSeq, takeCharStreamSeq,
     -- ** Indexing strings
     IndexableString(..), IOIndexableString(..), CuttableString(..),
     FromStringData(..), ToStringData(..), tryConvertString, convertString,

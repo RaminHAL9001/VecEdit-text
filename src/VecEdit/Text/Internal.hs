@@ -11,10 +11,14 @@ module VecEdit.Text.Internal
     emptyTextLine, textLineChomp, textLineContentLength,
     -- ** Folding over strings
     FoldableString(..), StringLength(..),
-    CharStreamable(..), CharStream,
-    getCharStream, stepCharStream, getCharStreamCount, charStreamAppend,
+    CharStreamable(..), CharStream, CharStreamBits,
+    getCharStream, charStreamSkip,
     indexFoldCharStream, foldCharStream, indexFoldStreamable, foldStreamable,
-    charStreamSetChar, charStreamSetEnd, charStreamUTF8Bytes, charStreamVector,
+    charStreamSetChar, charStreamEnd, charStreamUTF8Bytes, charStreamVector,
+    charStreamBitsNull, charStreamBitsGetChar,
+    -- *** Sequences of 'CharStream's
+    CharStreamSeq, charStreamSeqFromList, charStreamSeqNull,
+    putCharStreamSeq, takeCharStreamSeq,
     -- ** Indexing strings
     IndexableString(..), IOIndexableString(..), CuttableString(..),
     FromStringData(..), ToStringData(..), tryConvertString, convertString,
@@ -28,7 +32,8 @@ module VecEdit.Text.Internal
       ),
     defaultEditLineLiftResult,
     insertString, insert, joinLine, newline, lineBreak, copyBufferClear,
-    EditLine(..), LineBuffer, EditLineState, newEditLineState, runEditLine, streamEditor,
+    EditLine(..), LineBuffer, EditLineState, newEditLineState, runEditLine,
+    streamEditorDualStack, streamEditorStack,
     EditLineResult(..), editLineUTFWeight, onEditLineState, catchEditLineResult,
     maxCharIndex, minCharIndex, columnNumber,
     editLineTokenizer, editLineBreakSymbol, editLineLiftResult,
@@ -92,6 +97,8 @@ import qualified Data.ByteString.Builder as BuildBytes
 import Data.ByteString.Char8 (ByteString)
 import Data.Char (chr, ord, isAscii)
 import Data.String (IsString(..))
+import qualified Data.Sequence as Seq
+import Data.Sequence (Seq, (|>), ViewL((:<)))
 import qualified Data.String.UTF8 as UTF8String
 import qualified Data.Text as Strict
 import qualified Data.Text.Lazy as Lazy
@@ -354,136 +361,190 @@ putFoldable = hPutFoldable stdout
 
 -- | Similar to  a 'String', but optimized  for parsing. Use the 'toCharStream'  function to convert
 -- some kind of string into a 'CharStream'.
+--
+-- This function does not instantiate 'Monoid', but if you need to append 'CharStream's together,
+-- you can use the 'CharStreamSeq' data type, which acts as a FIFO.
 data CharStream
   = CharStream
-    { charStreamBits :: !Word32
-    , getCharStreamCount :: !Int
-      -- ^ Get the number of characters that have been consumed so far.
-    , stepCharStream :: CharStream
+    { charStreamBits :: !CharStreamBits
+    , charStreamSkip :: CharStream
       -- ^ Advance the 'CharStream' by 1 character.
     }
 
-instance Semigroup CharStream where
-  a <> b = case getCharStream a of
-    Nothing -> onCharStreamCount (+ (getCharStreamCount a)) b
-    Just{}  -> stepCharStream a <> b
+-- | This data structure contains the bits that encode a UTF character, as part of the 'CharStream'.
+newtype CharStreamBits = CharStreamBits Word32
+  deriving (Eq, Ord)
 
-instance Monoid CharStream where
-  mempty = charStreamSetEnd 0
+-- | If you need to append server 'CharStream's together, they must be
+-- wrapped in this data type.
+newtype CharStreamSeq = CharStreamSeq (Seq CharStream)
+
+instance Semigroup CharStreamSeq where
+  (CharStreamSeq a) <> (CharStreamSeq b) = CharStreamSeq (a <> b)
+
+instance Monoid CharStreamSeq where
+  mempty = CharStreamSeq Seq.empty
   mappend = (<>)
 
 instance Show CharStream where
-  show st =
-    "(char-stream :index " <>
-    show (getCharStreamCount st) <>
-    ( case getCharStream st of
-        Nothing -> " :end"
-        Just  c -> " :next " <> show c
-    ) <> ")"
+  showsPrec p = \ case
+    CharStream bits next ->
+      if charStreamBitsNull bits then id else
+      ((charStreamBitsGetChar bits) :) . showsPrec p next
 
-onCharStreamCount :: (Int -> Int) -> CharStream -> CharStream
-onCharStreamCount f st = st
-  { getCharStreamCount = f $! getCharStreamCount st
-  , stepCharStream = onCharStreamCount f $ stepCharStream st
-  }
+instance Show CharStreamBits where
+  show bits =
+    if charStreamBitsNull bits then "<NULL>" else
+    show $ charStreamBitsGetChar bits
 
--- | Get the next 'Char' in the 'CharStream', along with the next 'CharStream' function.
-getCharStream :: CharStream -> Maybe Char
-getCharStream st =
-  if testBit (charStreamBits st) 31 then Nothing else
-  Just $ chr $ fromIntegral $ charStreamBits st
+-- | Test if the 'CharStreamBits' are empty, which can only happen if there are no more characters
+-- in the 'CharStream'.
+charStreamBitsNull :: CharStreamBits -> Bool
+charStreamBitsNull (CharStreamBits bits) = testBit bits 31
+{-# INLINE charStreamBitsNull #-}
 
--- | Put more characters into a 'CharStream'
-charStreamAppend :: CharStreamable string => CharStream -> string -> CharStream
-charStreamAppend = toCharStream . getCharStreamCount
+-- | Get the 'Char' value stored within the 'CharStreamBits'. You __MUST__ evaluate
+-- 'charStreamBitsNull' prior to evaluating this function, or you may get garbled output.
+charStreamBitsGetChar :: CharStreamBits -> Char
+charStreamBitsGetChar (CharStreamBits bits) = chr $! fromIntegral bits
+{-# INLINE charStreamBitsGetChar #-}
+
+-- | True if a 'CharStreamSeq' is empty.
+charStreamSeqNull :: CharStreamSeq -> Bool
+charStreamSeqNull (CharStreamSeq sequ) = Seq.null sequ
+{-# INLINE charStreamSeqNull #-}
+
+-- | Push another 'CharStream' onto the end of the 'CharStreamSeq' FIFO.
+putCharStreamSeq :: CharStream -> CharStreamSeq -> CharStreamSeq
+putCharStreamSeq cs (CharStreamSeq sequ) = CharStreamSeq (sequ |> cs)
+{-# INLINE putCharStreamSeq #-}
+
+-- | Construct a 'CharStreamSeq' from a list of 'CharStream's.
+charStreamSeqFromList :: [CharStream] -> CharStreamSeq
+charStreamSeqFromList = foldr putCharStreamSeq mempty
+{-# INLINE charStreamSeqFromList #-}
+
+-- | Remove  a 'CharStream' from  the 'CharStreamSeq' (if  it exists) and  return it along  with the
+-- updated 'CharStreamSeq' with that 'CharStream' removed.
+takeCharStreamSeq :: CharStreamSeq -> (Maybe CharStream, CharStreamSeq)
+takeCharStreamSeq (CharStreamSeq sequ) = case Seq.viewl sequ of
+  a :< sequ -> (Just a, CharStreamSeq sequ)
+  _ -> (Nothing, CharStreamSeq sequ)
+{-# INLINE takeCharStreamSeq #-}
+
+-- | Get the next  'Char' in the 'CharStream', characters are counted starting  from the given 'Int'
+-- value.  Returns 'Left'  followed  by a  total  character count  if  the end  of  stream has  been
+-- reached. Otherwise, returns the current character count, the current character, and the next step
+-- in the 'CharStream'.
+getCharStream :: Int -> CharStream -> Either Int (Int, Char, CharStream)
+getCharStream i0 (CharStream bits next) =
+  if charStreamBitsNull bits then Left i0 else
+  let i1 = i0 + 1 in seq i1 $!
+  Right (i1, charStreamBitsGetChar bits, next)
+{-# INLINE getCharStream #-}
 
 -- | Fold an accumulating  function over all characters in a 'CharStream'  to produce an accumulated
 -- value of type @accum@.  The accumulating function also takes the index  value returned by calling
 -- 'getCharStreamCount' on the 'CharStream'
-indexFoldCharStream :: (Int -> Char -> accum -> accum) -> CharStream -> accum -> accum
-indexFoldCharStream f st accum = case getCharStream st of
-  Nothing -> accum
-  Just c  ->
-    indexFoldCharStream f
-    (stepCharStream st)
-    (f (getCharStreamCount st) c accum)
+indexFoldCharStream
+  :: (Int -> Char -> accum -> accum)
+  -> CharStream -> Int -> accum -> (Int, accum)
+indexFoldCharStream f st i0 accum = case getCharStream i0 st of
+  Right (i, c, next) -> indexFoldCharStream f next i $! f i0 c accum
+  Left i -> (i, accum)
+{-# INLINE indexFoldCharStream #-}
 
 -- | Like 'indexFoldCharStream' but ignores the index value.
 foldCharStream :: (Char -> accum -> accum) -> CharStream -> accum -> accum
-foldCharStream = indexFoldCharStream . const
+foldCharStream f str = snd . indexFoldCharStream (const f) str 0
+{-# INLINE foldCharStream #-}
 
 -- |  Runs  'foldCharStream' on  a  @string@  that  instantiates  the 'CharStreamable'  class.  This
 -- basically calls 'foldCharStream' on the result of 'toCharStream'.
 indexFoldStreamable
   :: CharStreamable string
   => (Int -> Char -> accum -> accum)
-  -> Int -> string -> accum -> accum
-indexFoldStreamable f i = indexFoldCharStream f . toCharStream i
+  -> string -> Int -> accum -> (Int, accum)
+indexFoldStreamable f str = indexFoldCharStream f $ toCharStream str $ charStreamEnd
+{-# INLINE indexFoldStreamable #-}
 
 -- | Same as 'indexFoldStreamable' but ignores the index value.
 foldStreamable
   :: CharStreamable string
   => (Char -> accum -> accum)
   -> string -> accum -> accum
-foldStreamable f = foldCharStream f . toCharStream 0
+foldStreamable f = foldCharStream f . flip toCharStream charStreamEnd
+{-# INLINE foldStreamable #-}
 
 -- | Construct  a 'CharStream' passing  the current 'Char',  and a lazily-evaluated  'CharStream' to
 -- produce the  next character, which  might be  'charStreamFinal' if the  given 'Char' is  the last
 -- one. The 'Int'  argument is the number of  characters that have been consumed, so  it is expected
 -- that you use this function in a loop in which you are keeping track of the number of characters.
-charStreamSetChar :: Int -> Char -> CharStream -> CharStream
-charStreamSetChar count c ~next = CharStream
-  { charStreamBits = fromIntegral $ ord c
-  , getCharStreamCount = count
-  , stepCharStream = next
+charStreamSetChar :: Char -> CharStream -> CharStream
+charStreamSetChar c ~next = CharStream
+  { charStreamBits = CharStreamBits $! fromIntegral $! ord c
+  , charStreamSkip = next
   }
 
 -- | Construct an  empty 'CharStream' in which 'getCharStream' always  produces 'Nothing'. Like with
 -- 'charStreamSetChar', it is expected that you use this function in a loop in which you are keeping
 -- track of the number of characters.
-charStreamSetEnd :: Int -> CharStream
-charStreamSetEnd i = CharStream
-  { charStreamBits = setBit 0 31
-  , getCharStreamCount = i
-  , stepCharStream = charStreamSetEnd i
+charStreamEnd :: CharStream
+charStreamEnd = CharStream
+  { charStreamBits = CharStreamBits $! setBit 0 31
+  , charStreamSkip = charStreamEnd
   }
 
 -- | Constructs a 'CharStream'  from UTF8-encoded characters that have been stored  in either a lazy
 -- 'LazyBytes.ByteString'   or  strict   'ByteString'.  This   function  is   used  to   instantiate
 -- 'toCharStream'  for   both  lazy  'LazyBytes.ByteString's   and  strict  'ByteString's,   so  the
 -- 'toCharStream' function is a more general type of this function.
-charStreamUTF8Bytes :: UTF8Bytes bytestring s => Int -> bytestring -> CharStream
-charStreamUTF8Bytes i str = case UTF8.decode str of
-  Nothing     -> charStreamSetEnd i
+charStreamUTF8Bytes :: UTF8Bytes bytestring s => bytestring -> CharStream -> CharStream
+charStreamUTF8Bytes str = case UTF8.decode str of
+  Nothing     -> id
   Just (c, n) ->
-    charStreamSetChar i c $
-    (charStreamUTF8Bytes $! i + 1) $
-    UTF8.drop n str
+    charStreamSetChar c .
+    charStreamUTF8Bytes (UTF8.drop n str)
 
 -- | Constructs a 'CharStream' from any unboxed 'UVec.Vector'.
-charStreamVector :: UMVec.Unbox c => (c -> Char) -> Int -> UVec.Vector c -> CharStream
-charStreamVector chr count str = loop count 0 where
-  loop count i =
-    if i >= UVec.length str then charStreamSetEnd i else
-    charStreamSetChar count
-    (chr $ UVec.unsafeIndex str i)
-    ((loop $! count + 1) $! i + 1)
+charStreamVector
+  :: UMVec.Unbox c
+  => (c -> Char) -> UVec.Vector c -> CharStream -> CharStream
+charStreamVector chr str = loop 0 where
+  loop i =
+    if i >= UVec.length str then id else
+    (charStreamSetChar $! chr $! UVec.unsafeIndex str i) .
+    (loop $! i + 1)
 
 -- | This is a typeclass of string types  that can produce streams of characters. In particular this
 -- is useful for parsing, and is used by the "VecEdit.Text.Parser" module.
 class CharStreamable str where
 
-  -- | Convert a string  to a 'CharStream'. Pass the  initial 'Int' value, which should be  0 if you
-  -- are initializing this 'CharStream' at the beginning of the string.
-  toCharStream :: Int -> str -> CharStream
+  -- | Convert a string to a 'CharStream'. Pass the initial 'Int' value, which should be 0 if you
+  -- are initializing this 'CharStream' at the beginning of the string. After the entire @str@ has
+  -- been unfolded, set the given 'CharStream' continuation as the value of 'charStreamSkip'.
+  toCharStream :: str -> CharStream -> CharStream
 
-instance CharStreamable CharStream where
-  toCharStream i st = onCharStreamCount (+ i) $ st{ getCharStreamCount = 0 }
+instance CharStreamable LineBreakSymbol where
+  toCharStream = \ case
+    NoLineBreak   -> id
+    LineBreakLF   -> one '\LF'
+    LineBreakCR   -> one '\CR'
+    LineBreakNUL  -> one '\NUL'
+    LineBreakLFCR -> two '\LF' '\CR'
+    LineBreakCRLF -> two '\CR' '\LF'
+    LineBreakFF   -> one '\FF'
+    LineBreakVT   -> one '\VT'
+    where
+      one c = charStreamSetChar c
+      two c0 c1 =
+        charStreamSetChar c0 .
+        charStreamSetChar c1
 
 instance CharStreamable String where
-  toCharStream i = \ case
-    ""   -> charStreamSetEnd i
-    c:cx -> charStreamSetChar i c $ (toCharStream $! i + 1) cx
+  toCharStream = \ case
+    ""   -> id
+    c:cx -> charStreamSetChar c . toCharStream cx
 
 instance CharStreamable ByteString where
   toCharStream = charStreamUTF8Bytes
@@ -492,34 +553,35 @@ instance CharStreamable LazyBytes.ByteString where
   toCharStream = charStreamUTF8Bytes
 
 instance CharStreamable Strict.Text where
-  toCharStream i str =
-    if Strict.null str then charStreamSetEnd i else
-    charStreamSetChar i (Strict.head str) $
-    (toCharStream $! i + 1) $
-    Strict.tail str
+  toCharStream str =
+    if Strict.null str then id else
+    charStreamSetChar (Strict.head str) .
+    toCharStream (Strict.tail str)
 
 instance CharStreamable ByteVector where
-  toCharStream i = charStreamVector fromChar8 i . unwrapByteVector
+  toCharStream = charStreamVector fromChar8 . unwrapByteVector
 
 instance CharStreamable (UVector Char) where
   toCharStream = charStreamVector id
 
 instance CharStreamable StringData where
-  toCharStream i = \ case
-    StringUndefined -> charStreamSetEnd i
-    StringText    str -> toCharStream i str
-    StringBytes   str -> toCharStream i str
-    StringByteVec str -> toCharStream i str
-    StringVector  str -> toCharStream i str
+  toCharStream = \ case
+    StringUndefined -> id
+    StringText    str -> toCharStream str
+    StringBytes   str -> toCharStream str
+    StringByteVec str -> toCharStream str
+    StringVector  str -> toCharStream str
 
 instance CharStreamable TextLineData where
-  toCharStream i = \ case
-    TextLineEmpty       -> charStreamSetEnd i
-    TextLineBytes   str -> toCharStream i str
-    TextLineChars _ str -> toCharStream i str
+  toCharStream = \ case
+    TextLineEmpty       -> id
+    TextLineBytes   str -> toCharStream str
+    TextLineChars _ str -> toCharStream str
 
 instance CharStreamable (TextLine tags) where
-  toCharStream i = toCharStream i . textLineString
+  toCharStream str =
+    toCharStream (theTextLineData str) .
+    toCharStream (theTextLineBreak str)
 
 ----------------------------------------------------------------------------------------------------
 
@@ -1387,11 +1449,11 @@ copyBufferClear lbrk =
 -- __NOTE:__ it may seem as though this function belongs in the "VecEdit.Text.Stream" module, but it
 -- is  a  specific  implementation   of  the  'EditLine'  function,  and  so   is  defined  in  this
 -- "VecEdit.Text.Line.Editor" module instead.
-streamEditor
+streamEditorDualStack
   :: EditLine tags a
   -> EditLineState tags
   -> IO (Either EditTextError a, EditLineState tags)
-streamEditor = loop [] [] where
+streamEditorDualStack = loop [] [] where
   err = Left . EditorPrimOpError . PopItem
   loop before after f st =
     runEditLine f st >>= \ (result, st) ->
@@ -1412,6 +1474,33 @@ streamEditor = loop [] [] where
             case after of
               [] -> pure (err dir, st)
               line:after -> loop before after (next line) st
+
+-- | Like 'streamEditor2Stack', but takes a continuation for handling 'EditLinePush' in the 'Before'
+-- direction, and pushes elements onto a stack for 'EditLinePush' in the 'After' direction. An
+-- exception is thrown if 'EditLinePop' is evaluated in the 'Before' direction.
+streamEditorStack
+  :: (TextLine tags -> EditLine tags ())
+  -> EditLine tags a
+  -> EditLineState tags
+  -> IO (Either EditTextError a, EditLineState tags)
+streamEditorStack push = loop [] where
+  err = Left . EditorPrimOpError . PopItem
+  loop after f st =
+    runEditLine f st >>= \ (result, st) ->
+    case result of
+      EditLineOK   a   -> pure (Right a, st)
+      EditLineFail err -> pure (Left err, st)
+      EditLinePush dir line next ->
+        case dir of
+          Before -> loop after (push line >> next) st
+          After  -> loop (line:after) next st
+      EditLinePop dir next ->
+        case dir of
+          Before -> pure (err Before, st)
+          After  ->
+            case after of
+              [] -> pure (err After, st)
+              line:after -> loop after (next line) st
 
 ----------------------------------------------------------------------------------------------------
 
@@ -1491,16 +1580,13 @@ type UTF8DecodeStep a = State UTF8Decoder a
 -- | This function is evaluated when a 'Char' is successfully decoded.
 type UTF8DecodeTakeChar a = Char -> State UTF8Decoder a
 
--- | This  function is  evaluated when a  bad character is  found. Use  'Control.Monad.State.get' to
--- obtain the  'UTF8Decoder' state, from that  you can obtain  information that might be  helpful to
--- you, such as:
+-- | This function is evaluated when a bad character is found. It takes 2 arguments:
 --
---  * 'theUTF8ByteCounter' -- the number of bytes decoded thus far
+--  1. the number of bytes decoded thus far
 --
---  * 'theUTF8ElemStore' -- the bytes themselves, merged together into a 'Word32' with earlier bytes
---    in   higher-significant   positions,    and   the   number   of   bytes    stored   noted   by
---    'theUTF8ElemCount'. Use 'utf8ErrorDecompose' to break this value up into the sequence of bytes
---    that caused the error.
+--  2. the   bytes   themselves,  merged   together  into   a  'Word32'   with   earlier   bytes  in
+--     higher-significant  positions. Use  'utf8ErrorDecompose'  to  break this  value  up into  the
+--     sequence of bytes that caused the error.
 --
 type UTF8DecodeTakeError a = State UTF8Decoder a
 

@@ -8,7 +8,8 @@ module VecEdit.Text.Line.Editor
     defaultEditLineLiftResult,
     insertString, insert, joinLine, newline, lineBreak, copyBufferClear,
     -- ** The 'EditLine' function type
-    EditLine(..), LineBuffer, EditLineState, newEditLineState, runEditLine, streamEditor,
+    EditLine(..), LineBuffer, EditLineState, newEditLineState, runEditLine,
+    streamEditorStack, streamEditorDualStack,
     EditLineResult(..), editLineUTFWeight, onEditLineState, catchEditLineResult,
     maxCharIndex, minCharIndex, columnNumber,
     editLineTokenizer, editLineBreakSymbol, editLineLiftResult,

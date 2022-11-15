@@ -205,9 +205,11 @@ maxLineIndex =
   toIndex . GaplessIndex . subtract 1 <$>
   editTextLiftGB GapBuf.cursorElemCount
 
--- | Return a 'TextRange' value that covers all lines.
-rangeAllLines :: EditText tags (TextRange LineIndex)
-rangeAllLines = TextRange 1 <$> maxLineIndex
+-- | Return a 'TextRange' value that covers all lines, returns 'Nothing' if the buffer is empty.
+rangeAllLines :: EditText tags (Maybe (TextRange LineIndex))
+rangeAllLines = maxLineIndex >>= \ case
+  0 -> pure Nothing
+  n -> pure $ Just $ TextRange 1 n
 
 genericInBounds
   :: (Monad m, Eq i, Ord i, Bounded i)
