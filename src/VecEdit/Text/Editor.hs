@@ -20,8 +20,8 @@ module VecEdit.Text.Editor
 import VecEdit.Types
   ( CharBufferSize, LineBufferSize,
     TextPoint(..), LineIndex, CharIndex, toIndex, fromIndex,
-    TextRange, textRangeIsForward,
-    VectorIndex, Range(..), TextRange(..), textRangeStart, textRangeEnd,
+    isCanonicalBoundary,
+    VectorIndex, Range(..), Boundary(..), LineBounds, boundaryStart, boundaryEnd,
     RelativeDirection(..), RelativeIndex, GaplessIndex(..),
     TextPrimOpError(..), EditTextError(..),
   )
@@ -206,10 +206,10 @@ maxLineIndex =
   editTextLiftGB GapBuf.cursorElemCount
 
 -- | Return a 'TextRange' value that covers all lines, returns 'Nothing' if the buffer is empty.
-rangeAllLines :: EditText tags (Maybe (TextRange LineIndex))
+rangeAllLines :: EditText tags (Maybe LineBounds)
 rangeAllLines = maxLineIndex >>= \ case
   0 -> pure Nothing
-  n -> pure $ Just $ TextRange 1 n
+  n -> pure $ Just $ Boundary 1 n
 
 genericInBounds
   :: (Monad m, Eq i, Ord i, Bounded i)
@@ -404,7 +404,7 @@ cursorToEnd dir =
 -- cursor iterating over each line, passing each line to the folding function along with it's line
 -- number, until the cursor has come to the beginning or end of the 'EditTextState' buffer has been
 -- reached. The buffer itself is left unmodified, and the cursor will remain in the position it
--- started before this function was called. This evaluates 'flushLine'.
+-- started before this function was called.
 foldLinesFromCursor
   :: Eq (TextLine tags)
   => RelativeDirection
@@ -451,18 +451,18 @@ foldLinesFromCursor dir f fold =
       fold
 
 -- | This function takes a 'TextRange' and then folds over every 'TextLine' in that range using the
--- given 'FoldTextLines' function. This evaluates 'flushLine'.
+-- given 'FoldTextLines' function.
 foldLinesInRange
   :: Eq (TextLine tags)
-  => TextRange LineIndex
+  => LineBounds
   -> FoldLinesStep tags fold void
   -> fold
   -> EditText tags fold
 foldLinesInRange range f fold = do
-  let forward = textRangeIsForward range
+  let forward = isCanonicalBoundary range
   (lo, hi) <- editTextLiftGB $ do
-    let start = fromIndex (range ^. textRangeStart)
-    let end   = fromIndex (range ^. textRangeEnd)
+    let start = fromIndex (range ^. boundaryStart)
+    let end   = fromIndex (range ^. boundaryEnd)
     loIndex <- GapBuf.fromGaplessIndex $ min start end
     hiIndex <- GapBuf.fromGaplessIndex $ max start end
     (loSlice, _, hiSlice) <- gapBuffer3SliceInRange $
@@ -486,17 +486,17 @@ foldLinesInRange range f fold = do
 
 -- | Perform a map over the lines in a 'TextRange' and freeze the results in an immutable
 -- buffer. The mapping function provided can simply be @('const' 'pure')@ to copy each line without
--- modification. This evaluates 'flushLine'.
+-- modification.
 mapRangeFreeze
   :: Eq tags
-  => TextRange LineIndex
+  => LineBounds
   -> (LineIndex -> TextLine tags -> IO a)
   -> EditText tags (Vector a)
 mapRangeFreeze range f = do
-  let forward = textRangeIsForward range
+  let forward = isCanonicalBoundary range
   editTextLiftGB $ do
-    let start = fromIndex (range ^. textRangeStart)
-    let end   = fromIndex (range ^. textRangeEnd)
+    let start = fromIndex (range ^. boundaryStart)
+    let end   = fromIndex (range ^. boundaryEnd)
     loIndex <- GapBuf.fromGaplessIndex $ min start end
     hiIndex <- GapBuf.fromGaplessIndex $ max start end
     (loSlice, _, hiSlice) <- gapBuffer3SliceInRange $

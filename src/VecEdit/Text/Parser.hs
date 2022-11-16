@@ -24,7 +24,7 @@ module VecEdit.Text.Parser
   ) where
 
 import VecEdit.Types
-       ( TextPoint(..), TextRange(..), ToIndex(..), IndexValue(..),
+       ( TextPoint(..), Boundary(..), TextBounds, ToIndex(..), IndexValue(..),
          LineIndex(..), CharIndex, textPointRow, textPointColumn,
        )
 import VecEdit.Print.DisplayInfo (DisplayInfo(displayInfo), displayInfoShow)
@@ -483,13 +483,13 @@ runParser doRepeat fold p0 =
   maxLineIndex >>= \ maxLine ->
   getLineIndex maxLine >>= \ finalLine ->
   flip (runParserOnRange doRepeat fold) p0 $
-  TextRange
-  { theTextRangeStart =
+  Boundary
+  { theBoundaryStart =
       TextPoint
       { theTextPointRow = 1
       , theTextPointColumn = 1
       }
-  , theTextRangeEnd =
+  , theBoundaryEnd =
       TextPoint
       { theTextPointRow = maxLine
       , theTextPointColumn = toIndex $ wrapIndex $ stringLength finalLine
@@ -505,7 +505,7 @@ runParserOnRange
   . Eq (TextLine tags)
   => Bool
   -> fold
-  -> TextRange TextPoint
+  -> TextBounds
   -> Parser fold tags a
   -> EditText tags [ParserResult fold tags a]
 runParserOnRange doRepeat fold range p0 =
@@ -514,8 +514,8 @@ runParserOnRange doRepeat fold range p0 =
   then pure []
   else getLineIndex firstRow >>= init
   where
-  TextPoint{theTextPointRow=firstRow, theTextPointColumn=firstColumn} = theTextRangeStart range
-  TextPoint{theTextPointRow=lastRow , theTextPointColumn=lastColumn } = theTextRangeEnd   range
+  TextPoint{theTextPointRow=firstRow, theTextPointColumn=firstColumn} = theBoundaryStart range
+  TextPoint{theTextPointRow=lastRow , theTextPointColumn=lastColumn } = theBoundaryEnd   range
   start =
     TextPoint
     { theTextPointRow = firstRow
