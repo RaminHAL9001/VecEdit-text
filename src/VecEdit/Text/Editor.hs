@@ -1,9 +1,9 @@
 -- | This module provides the fundamental APIs for building a text editor based on mutable
 -- vectors. These APIs are designed around interactive use, so unlike the APIs in
--- "VecEdit.Vector.Editor" and "VecEdit.Vector.Editor.GapBuffer", these APIs test the
--- indicies of all arguments and throw index exceptions when indicies are out of bounds. Obviously,
--- batch operations using these APIs will be much slower than using 'GapBuffer' or 'Editor', but
--- that is OK because these APIs are designed specifically for interactive use by end-users.
+-- "VecEdit.Vector.Editor" and "VecEdit.Vector.Editor.GapBuffer", these APIs test the indicies of
+-- all arguments and throw index exceptions when indicies are out of bounds. Obviously, batch
+-- operations using these APIs will be much slower than using 'GapBuffer' or 'Editor', but that is
+-- OK because these APIs are designed specifically for interactive use by end-users.
 module VecEdit.Text.Editor
   ( EditText(..), EditTextState, TextBuffer, editTextLineEditor,
     newEditTextState, loadStreamEditText, runEditText, evalEditText,
@@ -60,6 +60,8 @@ import qualified Data.Text.IO as Strict
 import Data.Vector (Vector, freeze)
 import qualified Data.Vector.Mutable as MVec
 import Data.Vector.Mutable (IOVector)
+
+import Debug.Trace (trace)
 
 ----------------------------------------------------------------------------------------------------
 
@@ -141,7 +143,9 @@ instance LineEditor EditText where
     -- line in the buffer, rather than hand it off to a continuation.
 
   -- editLineLiftResult :: EditLineResult editor tags a -> EditText tags a
-  editLineLiftResult = defaultEditLineLiftResult
+  editLineLiftResult =
+    trace "liftEditLine :: EditLine tags a -> EditText tags a" $
+    defaultEditLineLiftResult
 
 -- | Create a new 'EditText' state. Pass an initial line buffer size as the argument, remember that
 -- the size of the line buffer grows dynamically so under-sizing it is OK but being closer to the

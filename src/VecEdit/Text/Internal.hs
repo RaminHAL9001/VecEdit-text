@@ -73,6 +73,7 @@ import VecEdit.Vector.Editor.GapBuffer
   )
 
 import Control.Arrow ((***), (>>>))
+import Control.Exception (ErrorCall(..), throwIO, evaluate)
 import Control.Lens
   ( Lens', lens, use, (^.), (+~), (.~), (.=), (%=), (+=), (-=)
   )
@@ -1050,8 +1051,13 @@ showEditLineResult showTags showA = \ case
 instance LineEditor EditLine where
 
   -- liftEditLine :: EditLine tags a -> EditLine tags a
-  liftEditLine = error
-    "infinite loop: 'liftEditLine' evaluated in function context of type 'EditLine'"
+  liftEditLine _ =
+    liftIO $
+    throwIO
+    ( ErrorCall $
+      "infinite loop: 'liftEditLine' evaluated in function context of type 'EditLine'"
+    ) >>=
+    evaluate
 
   -- editLineLiftResult :: EditLineResult EditLine tags a -> EditLine tags a
   editLineLiftResult = EditLine . pure
